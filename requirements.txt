@@ -4,4 +4,4 @@ pip>=21.3.1
 pre-commit==4.5.1
 ruff==0.15.1
 mypy==1.19.1
-pytest-homeassistant-custom-component>=0.13.203
+pytest-homeassistant-custom-component>=0.13.346
