@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+set -e
+
+sudo apt-get update && sudo apt-get dist-upgrade -y
+
+cd /workspaces/hass-qwikswitch-api
+
+# Install project dependencies
+python3 -m pip install --requirement requirements.txt
+
+# Install the pre-commit hooks
+pre-commit install
+
+# Install Claude Code
+curl -fsSL https://claude.ai/install.sh | bash
+
+#mypy --install-types
