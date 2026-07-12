@@ -32,7 +32,8 @@ uv run pre-commit run --all-files  # Run all hooks
 
 Pre-commit hooks: pre-commit-hooks (json/yaml/toml validation, hygiene,
 detect-private-key), codespell, ruff (+ ruff-format), markdownlint, shellcheck,
-actionlint, gitleaks (secret scanning), pip-audit (dependency vulnerabilities).
+actionlint, gitleaks (secret scanning), pip-audit (dependency vulnerabilities),
+pytest (full test suite, runs when any `.py` file is staged).
 
 ### Testing
 
@@ -43,6 +44,15 @@ uv run pytest tests/test_foo.py::test_bar -v  # Run a single test
 ```
 
 Tests use `pytest-homeassistant-custom-component` which provides Home Assistant's test infrastructure.
+
+**Code must be accompanied by tests.** Every change to integration source
+(`custom_components/ezviz_stream/`) lands with tests that cover it — new behaviour
+gets new tests, bug fixes get a regression test. Home Assistant components,
+`hass`, config entries, and the like are **mocked out** via
+`pytest-homeassistant-custom-component` (its `MockConfigEntry`, `hass` fixture,
+and helpers) — never require a live HA instance or real EZVIZ cloud calls in a
+test. The `pytest` pre-commit hook runs the full suite whenever a `.py` file is
+staged, so tests must pass before a commit completes.
 
 ## Architecture
 
@@ -151,6 +161,9 @@ Two GitHub Actions workflows on push/PR to main:
 - **Don't let issues hang.** Surface problems proactively; fix low-impact ones
   directly, ask before fixing high-impact ones. Never bypass failing checks,
   broken tests, or other issues just to keep going.
+- **Code must be accompanied by tests.** New/changed integration code lands with
+  tests; mock Home Assistant with `pytest-homeassistant-custom-component` (see
+  Testing above). The `pytest` pre-commit hook enforces this on every `.py` change.
 - **Research, don't assume** — verify options (including via web search) rather
   than assuming APIs/libraries behave as described.
 - **If something can be caught by a pre-commit hook, add it** — prefer enforcing a

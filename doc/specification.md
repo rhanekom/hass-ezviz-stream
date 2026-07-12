@@ -283,12 +283,19 @@ hass-ezviz-stream/
 Auth (login / device list / VTDU tokens) is delegated to **`pyEzvizApi`** (a
 manifest requirement) — we implement only `handshake.py`.
 
-### 6.3 Device-registry linking (Powercalc-style)
+### 6.3 Device-registry linking
 
 We want our live-view camera to appear **on the same device card** as the official
-`ezviz` integration's entities, without depending on or modifying it. This is the
-Powercalc pattern: create our *own* entity in our *own* config entry, then attach
-it to the existing device by reusing that device's identifier in `device_info`:
+`ezviz` integration's entities, without depending on or modifying it. In HA the
+frontend groups entities onto a device card purely by the **`device_id`** stamped
+on each entity's registry entry, and a registry entry's `config_entry_id` and
+`device_id` are independent — so an entity *we* own can carry the `device_id` of a
+device owned by another config entry. The task is just to get the right
+`device_id` onto our entity's registry entry.
+
+We create our *own* entity in our *own* config entry and give it a `device_info`
+whose `identifiers` reuse the identity the official integration's device already
+has:
 
 ```python
 CameraEntity._attr_device_info = DeviceInfo(
@@ -296,19 +303,36 @@ CameraEntity._attr_device_info = DeviceInfo(
 )
 ```
 
-HA merges entities sharing a device identifier onto one device, so our camera lands
-under the existing EZVIZ device. Notes:
+When HA registers an entity carrying `device_info`, it calls the device registry's
+get-or-create with **our** config-entry id and those identifiers; because a device
+with that identifier already exists, HA **merges** — it adds our config entry to
+that device's owning set and stamps the device's id onto our entity. Our camera
+then lands under the existing EZVIZ device. This uses only public, documented HA
+APIs. Notes:
 
 - **No hard dependency.** If the official integration isn't installed, HA simply
   creates a device from our `device_info` — we still work standalone. Do **not**
   add `ezviz` to `dependencies`/`after_dependencies` and do **not** read its
   `hass.data` (private, breaks across HA releases).
-- **Own credentials.** Unlike Powercalc (which only reads entity *state*), we need
-  EZVIZ cloud creds ourselves for the handshake (§3), so we ship our own config
-  flow (§7) — we do not borrow the official integration's session.
+- **Own credentials.** We need EZVIZ cloud creds ourselves for the handshake (§3),
+  so we ship our own config flow (§7) — we do not borrow the official
+  integration's session.
 - **Optional convenience.** The config flow *may* enumerate existing `ezviz`
   devices (via the public device/entity registry) to pre-fill the serial picker —
   a nicety, not a requirement.
+
+> **Correction (2026-07-12).** Earlier drafts called this "the Powercalc pattern"
+> and implied that project attaches via matching `device_info` identifiers. It
+> does **not**: it resolves the *actual* target `DeviceEntry` (from a user-picked
+> source entity/device) and binds our entity's `device_id` to it directly — for
+> config-entry entities by setting the entity's device reference before
+> registration (an HA-core *internal* attribute), and for YAML/platform entities
+> by explicitly updating the entity-registry `device_id` afterwards. Crucially, it
+> never adds its own config entry to the target device's owning set. Both routes
+> reach the same visual result; we deliberately choose the **shared-identifier**
+> route above because it is the clean public-API path and degrades gracefully to
+> standalone. The full comparison of both techniques (with edge cases and the
+> HA registry helpers involved) is in `reference.md` Part D.
 
 ## 7. Config & security
 

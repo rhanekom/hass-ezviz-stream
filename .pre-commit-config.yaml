@@ -107,3 +107,15 @@ repos:
         language: system
         pass_filenames: false
         files: ^(uv\.lock|pyproject\.toml)$
+
+  # Full Python test suite. Runs the whole suite once (not per-file) whenever any
+  # Python file is staged. pytest exit code 5 ("no tests collected") is treated as
+  # success so commits aren't blocked before the first test lands.
+  - repo: local
+    hooks:
+      - id: pytest
+        name: 🧪 pytest
+        entry: bash -c 'uv run pytest tests/; ec=$?; [ "$ec" -eq 5 ] && exit 0 || exit "$ec"'
+        language: system
+        pass_filenames: false
+        files: \.py$
