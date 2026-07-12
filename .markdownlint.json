@@ -1,0 +1,16 @@
+{
+  "$comment-1": "MD013: disabled — tables and spec prose regularly exceed 80 chars and wrapping breaks readability",
+  "$comment-2": "MD036: disabled — spec uses bold emphasis as sub-headings within sections intentionally",
+  "$comment-3": "MD040: disabled — some fenced blocks are plain text/pseudocode with no applicable language tag",
+  "$comment-4": "MD060: disabled — table column alignment is cosmetic; auto-formatters handle it inconsistently",
+  "default": true,
+  "MD003": { "style": "atx" },
+  "MD004": { "style": "dash" },
+  "MD007": { "indent": 4 },
+  "MD013": { "line_length": 9999 },
+  "MD036": false,
+  "MD040": false,
+  "MD060": false,
+  "no-hard-tabs": false,
+  "whitespace": false
+}

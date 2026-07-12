@@ -34,8 +34,8 @@ Report a bug by [opening a new issue](../../issues/new/choose); it's that easy!
 
 - A quick summary and/or background
 - Steps to reproduce
-  - Be specific!
-  - Give sample code if you can.
+    - Be specific!
+    - Give sample code if you can.
 - What you expected would happen
 - What actually happens
 - Notes (possibly including why you think this might be happening, or stuff you tried that didn't work)
@@ -56,8 +56,8 @@ Home Assistant instance running and already configured with the included
 [`configuration.yaml`](./config/configuration.yaml)
 file.
 
-* `/scripts/develop` will start an instance of Home Assistant for testing purposes.
-* Running `/scripts/clean` will remove all Home Assistant create files if you'd like to start afresh.
+- `.devcontainer/scripts/develop` will start an instance of Home Assistant for testing purposes.
+- Running `.devcontainer/scripts/clean` will remove all Home Assistant created files if you'd like to start afresh.
 
 
 ## License

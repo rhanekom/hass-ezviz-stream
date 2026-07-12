@@ -2,17 +2,51 @@
 
 set -e
 
-sudo apt-get update && sudo apt-get dist-upgrade -y
+# User-specific and project setup. Runs on every container (re)create via
+# postCreateCommand, so it must stay fast. Machine-wide/global installs
+# (system packages, gh, gitleaks, actionlint, uv, pip upgrade) live in the
+# Dockerfile so they are baked into the cached image, not re-run here.
 
-cd /workspaces/hass-qwikswitch-api
+cd /workspaces/hass-ezviz-stream
 
-# Install project dependencies
-python3 -m pip install --requirement requirements.txt
+# Activate zsh-syntax-highlighting
+echo "source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" >> ~/.zshrc
 
-# Install the pre-commit hooks
-pre-commit install
+# Install and activate zsh-autosuggestions
+git clone https://github.com/zsh-users/zsh-autosuggestions ~/.oh-my-zsh/custom/plugins/zsh-autosuggestions
 
-# Install Claude Code
+# Install Powerline fonts
+cd ~ || exit
+git clone https://github.com/powerline/fonts.git --depth=1
+cd fonts || exit
+./install.sh
+cd .. && rm -rf fonts
+
+# ZSH theme and plugins
+sed -i '/^ZSH_THEME/c\ZSH_THEME="agnoster"' ~/.zshrc
+sed -i '/^plugins/c\plugins=(git python node npm poetry poetry-env zsh-autosuggestions)' ~/.zshrc
+
+PATH=/home/vscode/.local/bin:$PATH
+echo "PATH=/home/vscode/.local/bin:\$PATH" | tee -a ~/.bashrc ~/.zshrc
+
+# Ensure NVM is loaded and install Node LTS (per-user)
+# shellcheck disable=SC1091
+source "${NVM_DIR}"/nvm.sh && nvm install --lts
+
+# Add aliases
+echo 'alias cl="claude --dangerously-skip-permissions"' | tee -a ~/.bashrc ~/.zshrc
+
+# Install Claude Code (per-user, into $HOME)
 curl -fsSL https://claude.ai/install.sh | bash
 
-#mypy --install-types
+# Install the mcp-launchpad uv tool (uv itself is installed globally in the Dockerfile)
+uv tool install https://github.com/kenneth-liao/mcp-launchpad.git
+
+# Return to the workspace before touching project files
+cd /workspaces/hass-ezviz-stream
+
+# Install project dependencies into the uv-managed .venv (from pyproject.toml/uv.lock)
+uv sync
+
+# Install the pre-commit hooks
+uv run pre-commit install

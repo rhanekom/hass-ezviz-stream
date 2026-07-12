@@ -2,7 +2,7 @@
 
 set -e
 
-cd /workspaces/hass-qwikswitch-api/config
+cd /workspaces/hass-ezviz-stream/config
 
 find . ! -name 'configuration.yaml' -type f -exec rm -f {} +
 rm -rf .storage .cloud blueprints tts

@@ -1,0 +1,33 @@
+[project]
+name = "hass-ezviz-stream"
+version = "0.0.0"
+description = "Home Assistant integration streaming EZVIZ battery cameras via the EZVIZ cloud"
+readme = "README.md"
+requires-python = ">=3.13"
+# Runtime dependencies of the integration. Mirror the `requirements` list from
+# custom_components/ezviz_stream/manifest.json here (e.g. pyEzvizApi): Home
+# Assistant installs them at launch, but our dev tooling and the pip-audit hook
+# (which audits `uv export --no-dev`, i.e. this tree only, excluding HA) need them
+# declared here too. Keep the two in step.
+dependencies = []
+
+# Development / tooling dependencies (source of truth for the dev environment).
+# Manage with uv:
+#   uv sync              install/refresh the .venv from uv.lock
+#   uv add --dev <pkg>   add a dev dependency (updates pyproject.toml + uv.lock)
+#   uv run <cmd>         run a command inside the project environment
+[dependency-groups]
+dev = [
+    "colorlog==6.10.1",
+    "homeassistant>=2024.11.0",
+    "pre-commit==4.5.1",
+    "ruff==0.15.1",
+    "mypy==1.19.1",
+    "python-dotenv",
+    "pytest-homeassistant-custom-component>=0.13.203",
+]
+
+# This repo is a Home Assistant custom component, not an installable package, so
+# tell uv not to build/install the project itself — only manage its dependencies.
+[tool.uv]
+package = false

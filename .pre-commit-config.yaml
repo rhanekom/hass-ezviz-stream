@@ -1,30 +1,109 @@
-# Pre-commit file adapted from https://github.com/boralyl/cookiecutter-homeassistant-component
+# Pre-commit configuration.
+# Originally adapted from https://github.com/boralyl/cookiecutter-homeassistant-component
+# Run all hooks locally with: uv run pre-commit run --all-files
 repos:
-  - repo: https://github.com/asottile/pyupgrade
-    rev: v3.21.2
+  # General hygiene + structured-file validation (JSON / YAML / TOML) + secret/key checks.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
     hooks:
-      - id: pyupgrade
-        args: [--py313-plus]
-  - repo: https://github.com/psf/black
-    rev: 26.1.0
-    hooks:
-      - id: black
-        args:
-          - --safe
-          - --quiet
-        language_version: python3.13
+      - id: check-json
+        name: 📋 check JSON
+        # devcontainer.json is JSONC (comments allowed); don't parse it as strict JSON.
+        exclude: ^\.devcontainer/devcontainer\.json$
+      - id: check-toml
+        name: 📋 check TOML
+      - id: check-yaml
+        name: 📋 check YAML
+        # Home Assistant config uses custom !include / !secret tags.
+        exclude: ^config/
+      - id: check-added-large-files
+        name: 📦 check for large files
+        # uv.lock is a large but trusted generated lockfile; keep the default
+        # 500kB cap for everything else so stray media/binaries are still caught.
+        exclude: ^uv\.lock$
+      - id: check-merge-conflict
+        name: 🔀 check for merge conflicts
+      - id: detect-private-key
+        name: 🔑 detect private keys
+      - id: detect-aws-credentials
+        name: 🔑 detect AWS credentials
+        args: [--allow-missing-credentials]
+      - id: end-of-file-fixer
+        name: 🧹 fix end of files
+      - id: trailing-whitespace
+        name: 🧹 trim trailing whitespace
+      - id: mixed-line-ending
+        name: 🧹 normalize line endings
+        args: [--fix=lf]
+      - id: check-executables-have-shebangs
+        name: 🔧 check executables have shebangs
+      - id: check-shebang-scripts-are-executable
+        name: 🔧 check shebang scripts are executable
+
+  # Spell-checking (not covered by ruff).
   - repo: https://github.com/codespell-project/codespell
-    rev: v2.4.1
+    rev: v2.4.2
     hooks:
       - id: codespell
+        name: 🔤 codespell
         args:
           - --ignore-words-list=hass,alot,datas,dof,dur,farenheit,hist,iff,ines,ist,lightsensor,mut,nd,pres,referer,ser,serie,te,technik,ue,uint,visability,wan,wanna,withing
           - --skip="./.*,*.csv,*.json"
           - --quiet-level=2
         exclude_types: [csv, json]
+
+  # Python lint + format. ruff (select = ["ALL"]) also covers pyupgrade (UP rules),
+  # and ruff-format replaces black, so neither of those is run separately.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.1
+    rev: v0.15.21
     hooks:
       - id: ruff
+        name: 🐍 ruff lint
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
+        name: 🐍 ruff format
+
+  # Markdown lint (config in .markdownlint.json).
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.23.0
+    hooks:
+      - id: markdownlint-cli2
+        name: 📝 markdownlint
+
+  # Shell script linting.
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+        name: 🐚 shellcheck
+
+  # GitHub Actions workflow linting (uses the actionlint binary from the Dockerfile).
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint-system
+        name: 🤖 actionlint
+
+  # Secret scanning (uses the gitleaks binary from the Dockerfile).
+  # Pinned to v8.30.1 (newer than autoupdate's default-branch tag) to match the
+  # Dockerfile binary. pass_filenames is overridden because the gitleaks-system
+  # manifest omits it, which otherwise breaks `pre-commit run --all-files`.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks-system
+        name: 🔒 gitleaks
+        pass_filenames: false
+
+  # Dependency vulnerability scanning. Runs only when dependencies change, and
+  # audits ONLY our runtime dependency tree ([project.dependencies], mirrored from
+  # manifest.json). The dev group — Home Assistant + tooling, whose large
+  # transitive tree we don't control — is excluded via `uv export --no-dev`.
+  - repo: local
+    hooks:
+      - id: pip-audit
+        name: 🛡️ pip-audit (our deps, excluding Home Assistant)
+        entry: bash -c 'uv export --no-dev --no-hashes --quiet --format requirements.txt -o /tmp/ezviz-audit-reqs.txt && uv run --with pip-audit pip-audit --requirement /tmp/ezviz-audit-reqs.txt'
+        language: system
+        pass_filenames: false
+        files: ^(uv\.lock|pyproject\.toml)$

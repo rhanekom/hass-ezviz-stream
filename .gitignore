@@ -5,6 +5,9 @@ __pycache__
 */build/*
 */dist/*
 
+# uv-managed virtual environment (uv.lock IS committed)
+.venv
+
 
 # misc
 .coverage

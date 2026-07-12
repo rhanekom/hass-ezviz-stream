@@ -1,6 +1,9 @@
 {
     "name": "rhanekom/hass-ezviz-stream",
-    "image": "mcr.microsoft.com/devcontainers/python:3.13",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": "."
+    },
     "postCreateCommand": "/workspaces/hass-ezviz-stream/.devcontainer/scripts/setup",
     "forwardPorts": [
         8123
@@ -16,9 +19,13 @@
             "extensions": [
                 "charliermarsh.ruff",
                 "github.vscode-pull-request-github",
+                "github.vscode-github-actions",
                 "ms-python.python",
                 "ms-python.vscode-pylance",
-                "ryanluker.vscode-coverage-gutters"
+                "ryanluker.vscode-coverage-gutters",
+                "DavidAnson.vscode-markdownlint",
+                "redhat.vscode-yaml",
+                "tamasfe.even-better-toml"
             ],
             "settings": {
                 "files.eol": "\n",
@@ -29,21 +36,13 @@
                 "files.trimTrailingWhitespace": true,
                 "python.analysis.typeCheckingMode": "basic",
                 "python.analysis.autoImportCompletions": true,
-                "python.defaultInterpreterPath": "/usr/local/bin/python",
+                "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+                "python.terminal.activateEnvironment": true,
                 "[python]": {
                     "editor.defaultFormatter": "charliermarsh.ruff"
                 }
             }
         }
     },
-    "remoteUser": "vscode",
-    "features": {
-        "ghcr.io/devcontainers-extra/features/apt-packages:1": {
-            "packages": [
-                "ffmpeg",
-                "libturbojpeg0",
-                "libpcap-dev"
-            ]
-        }
-    }
+    "remoteUser": "vscode"
 }
