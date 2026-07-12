@@ -5,6 +5,11 @@
         "context": "."
     },
     "postCreateCommand": "/workspaces/hass-ezviz-stream/.devcontainer/scripts/setup",
+    "features": {
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {
+            "moby": false
+        }
+    },
     "forwardPorts": [
         8123
     ],

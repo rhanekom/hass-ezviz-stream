@@ -1,0 +1,38 @@
+{
+    "mcpServers": {
+        "context7": {
+            "type": "http",
+            "url": "https://mcp.context7.com/mcp",
+            "headers": {
+                "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"
+            }
+        },
+        "tavily": {
+            "command": "npx",
+            "args": [
+                "-y",
+                "tavily-mcp"
+            ],
+            "env": {
+                "TAVILY_API_KEY": "${TAVILY_API_KEY}"
+            }
+        },
+        "sonarqube": {
+            "command": "docker",
+            "args": [
+                "run",
+                "-i",
+                "--rm",
+                "-e",
+                "SONARQUBE_TOKEN",
+                "-e",
+                "SONARQUBE_ORG",
+                "mcp/sonarqube"
+            ],
+            "env": {
+                "SONARQUBE_TOKEN": "${SONARQUBE_TOKEN}",
+                "SONARQUBE_ORG": "${SONARQUBE_ORG}"
+            }
+        }
+    }
+}

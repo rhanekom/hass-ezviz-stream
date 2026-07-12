@@ -109,6 +109,23 @@ If you need a tool that isn't installed, install it **and persist it**: global
 tools go in the Dockerfile, user/project tools go in the `setup` script — never
 rely on an ad-hoc install that vanishes on the next rebuild.
 
+## MCP Launchpad (`mcpl`)
+
+`mcpl` is a CLI gateway to tools from all configured MCP servers. The user's MCP
+config can change at any time, so **when a task needs a capability outside the
+current tools, check `mcpl` first.**
+
+- **Always discover before calling — never guess tool names** (they vary by
+  server). Search, then call:
+
+  ```bash
+  mcpl search "<query>"            # find tools across servers (shows required params)
+  mcpl list <server>              # list a server's tools
+  mcpl inspect <server> <tool> --example   # full schema + ready-to-use example call
+  mcpl call <server> <tool> '{"param": "value"}'   # execute
+  mcpl verify                     # test all server connections
+  ```
+
 ## Ruff Configuration
 
 All lint rules enabled (`select = ["ALL"]`) with specific exclusions. Target: Python 3.13. Max complexity: 25. Test files have relaxed rules (asserts, magic values, missing docstrings allowed). See `.ruff.toml` for details.
