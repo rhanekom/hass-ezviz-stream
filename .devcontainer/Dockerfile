@@ -13,9 +13,10 @@ ARG GITLEAKS_VERSION=8.30.1
 ARG ACTIONLINT_VERSION=1.7.12
 
 # System packages:
-#   ffmpeg / libturbojpeg0 - media decode + JPEG for the stream pipeline
-#   libpcap-dev            - packet capture for protocol reverse-engineering
-#   shellcheck             - shell linting (editor + manual use)
+#   ffmpeg / libturbojpeg0        - media decode + JPEG for the stream pipeline
+#   libpcap-dev                   - packet capture for protocol reverse-engineering
+#   shellcheck                    - shell linting (editor + manual use)
+#   build-essential / procps / file - Homebrew (Linuxbrew) prerequisites
 RUN apt-get update \
     && apt-get -y dist-upgrade \
     && apt-get install -y \
@@ -23,6 +24,9 @@ RUN apt-get update \
         libturbojpeg0 \
         libpcap-dev \
         shellcheck \
+        build-essential \
+        procps \
+        file \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI (gh) from the official apt repo.
@@ -49,3 +53,11 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 
 # Upgrade pip (machine-wide).
 RUN python3 -m pip install --upgrade pip
+
+# Homebrew (Linuxbrew) - package manager for user dev tools (e.g. lazygit,
+# installed in scripts/setup). Must run as the non-root 'vscode' user because
+# Homebrew refuses to run as root; switch back afterwards.
+USER vscode
+RUN NONINTERACTIVE=1 /bin/bash -c \
+    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+USER root

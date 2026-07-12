@@ -4,8 +4,8 @@ set -e
 
 # User-specific and project setup. Runs on every container (re)create via
 # postCreateCommand, so it must stay fast. Machine-wide/global installs
-# (system packages, gh, gitleaks, actionlint, uv, pip upgrade) live in the
-# Dockerfile so they are baked into the cached image, not re-run here.
+# (system packages, gh, gitleaks, actionlint, uv, pip upgrade, Homebrew) live in
+# the Dockerfile so they are baked into the cached image, not re-run here.
 
 cd /workspaces/hass-ezviz-stream
 
@@ -38,6 +38,13 @@ echo 'alias cl="claude --dangerously-skip-permissions"' | tee -a ~/.bashrc ~/.zs
 
 # Install Claude Code (per-user, into $HOME)
 curl -fsSL https://claude.ai/install.sh | bash
+
+# Make Homebrew (installed machine-wide in the Dockerfile) available on PATH and
+# install lazygit (git TUI). Persist brew shellenv for interactive shells.
+eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+# shellcheck disable=SC2016  # intentional: write the literal shellenv call to the rc files
+echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' | tee -a ~/.bashrc ~/.zshrc
+brew install lazygit
 
 # Install the mcp-launchpad uv tool (uv itself is installed globally in the Dockerfile)
 uv tool install https://github.com/kenneth-liao/mcp-launchpad.git
