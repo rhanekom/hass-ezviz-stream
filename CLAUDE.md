@@ -140,6 +140,13 @@ current tools, check `mcpl` first.**
 
 All lint rules enabled (`select = ["ALL"]`) with specific exclusions. Target: Python 3.13. Max complexity: 25. Test files have relaxed rules (asserts, magic values, missing docstrings allowed). See `.ruff.toml` for details.
 
+- **Prefer inline suppression over global suppression.** To silence a lint rule in
+  integration code (`custom_components/`), use a targeted inline `# noqa: <CODE>`
+  (with a reason) on the offending line — do **not** add a rule to `ignore` or
+  `per-file-ignores` in `.ruff.toml`. The **only** exceptions are the `tests/` and
+  `scripts/` directories, whose `per-file-ignores` blocks in `.ruff.toml` are the
+  accepted place to relax rules wholesale (test/CLI ergonomics).
+
 ## CI/CD
 
 Two GitHub Actions workflows on push/PR to main:

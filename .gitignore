@@ -24,3 +24,13 @@ config/*
 *~
 
 .env
+
+# diagnostic capture artifacts
+scripts/out/
+*.h265
+*.hevc
+*.jpg
+*.mpg
+*.mpeg
+*.ts
+*.bin

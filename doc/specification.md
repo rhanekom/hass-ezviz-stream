@@ -17,10 +17,21 @@ solution, not from scratch.
 >
 > - **Auth layer:** depend on `RenierM26/pyEzvizApi` (manifest requirement) for
 >   login / device list / VTDU tokens; implement only the VTM/VTDU handshake here.
+> - **Target cameras:** **both battery *and* mains-powered ("normal") cameras.**
+>   The battery models drove this project (no local RTSP), but the same cloud path
+>   serves normal cams too, so v1 supports both.
+> - **Media transport:** **not assumed to be RTP.** The channel-`0x01` body varies
+>   by model/firmware — newer models emit RTP/H.265, older (many battery) models
+>   emit **MPEG-PS**. The decode path **auto-detects the transport from the first
+>   bytes and branches** (see §4 / `reference.md` B.7). This is the single biggest
+>   portability risk, and — with normal cams now in scope — an explicit v1 concern,
+>   not a footnote.
 > - **Codec:** default to on-demand HEVC→H.264 transcode; native HEVC as a config
 >   option (see §6.1).
-> - **Encryption:** require Image Encryption **OFF** for v1 (channel `0x01`); the
->   encrypted `0x0b` path is out of scope for v1.
+> - **Encryption:** require Image Encryption **OFF** for v1 (unencrypted channels
+>   `0x00`/`0x01`); the encrypted `0x0a`/`0x0b` path is out of scope for v1.
+> - **2FA:** must be **disabled** on the EZVIZ account for v1 — same stance as the
+>   official `ezviz` integration (see §7).
 > - **Serving path (§6):** **decided — option A, go2rtc `exec:` source.** HA bundles
 >   go2rtc, which gives us on-demand process start/stop (the core battery
 >   requirement) and WebRTC/HLS/RTSP fan-out for free. Option B (standalone add-on)
@@ -61,8 +72,10 @@ EZVIZ account login (HTTPS)                     # api<region>.ezvizlife.com
   → device list  → VTM node (ip:port)           # /v3/userdevices/.../pagelist?filter=VTM
   → VTDU tokens                                 # {authAddr}/vtdutoken2
   → TCP to VTM: StreamInfoReq → VTDU redirect    # ysproto:// custom binary proto
-  → TCP to VTDU: StreamInfoReq → media packets   # channel 0x01 = H.265-over-RTP
-  → RTP/RFC-7798 de-packetize → Annex-B HEVC     # <-- the key decode
+  → TCP to VTDU: StreamInfoReq → media packets   # channel 0x01 media
+  → detect transport (RTP / MPEG-PS / TS)         # varies by model (§4)
+  → RTP: RFC-7798 de-packetize → Annex-B HEVC     # <-- the key decode (RTP models)
+  → PS/TS: hand to FFmpeg demuxer                  # older/battery models
   → FFmpeg → HLS/RTSP/(optional H.264 transcode) → HA camera
 ```
 
@@ -89,7 +102,8 @@ Key facts (constants from `ezviz_stream.py`):
   `clientVersion="2,5,1,2109068"`, `featureCode` = 32 zeros.
 - **Login:** `POST /v3/users/login/v5`, form-encoded
   `account=<email>&password=<MD5(password)>&featureCode=…&cuName=<b64>` →
-  `loginSession.sessionId` (a **JWT**).
+  `loginSession.sessionId` (a **JWT**). **2FA must be off** (§7); an account with
+  2FA enabled returns an MFA challenge (code `6002`) that v1 does not handle.
 - **Server info:** `POST /api/server/info/get` → `serverResp.authAddr`.
 - **Devices:** `GET /v3/userdevices/v1/resources/pagelist?...&filter=VTM` →
   `resourceInfos[]` (match `deviceSerial`, need `resourceType>0`) and a `VTM`
@@ -122,8 +136,29 @@ Key facts (constants from `ezviz_stream.py`):
 
 ## 4. Stream format (the decode — our contribution)
 
-Each **channel-`0x01`** packet body is **one standard RTP packet carrying H.265
-(RFC 7798)**:
+**The channel-`0x01` body is not always the same container** — it varies by camera
+model and firmware, and since v1 targets both battery and normal cams we must
+handle the spread. Auto-detect from the first bytes of the reassembled body and
+branch (full table in `reference.md` B.7):
+
+| First bytes | Transport | Handling |
+|-------------|-----------|----------|
+| version bits `10` in byte 0, `PT=96` | **RTP** (RFC 7798), dynamic HEVC | de-packetize (§4.1) → Annex-B HEVC |
+| `00 00 01 BA` | **MPEG-PS** (pack header) — carries video **and** audio | hand to FFmpeg as `-f mpegts`/PS, or demux the PES; **no §4.1 needed** |
+| `0x47` | MPEG-TS | hand to FFmpeg as `-f mpegts` |
+| *(other)* | MPEG-4 / unknown | log a sample and treat as unsupported for now |
+
+Roughly: **newer models emit RTP/H.265; many older/battery models emit MPEG-PS**
+(the only container observed to carry audio). The spike (§9 milestone 1–2) records
+which transport each of our test cameras actually emits. The RTP branch below is
+the proven core; the MPEG-PS branch mostly defers to FFmpeg's own demuxer, so it
+needs far less bespoke code — validate it against a real PS-emitting camera before
+relying on it.
+
+### The RTP branch
+
+When the transport is RTP, each **channel-`0x01`** packet body is **one standard
+RTP packet carrying H.265 (RFC 7798)**:
 
 - 12-byte RTP header: `V=2`, **`PT=96`** (dynamic → H.265), seq, timestamp,
   **`SSRC=0x55667788`** (the recurring "magic" bytes are just the SSRC).
@@ -343,6 +378,20 @@ APIs. Notes:
   the EZVIZ **PC/Studio** client against the user's own account — legitimate for
   the user's own devices (interoperability), but treat creds as sensitive.
 - Cache the `sessionId`/tokens; don't re-login on every reconnect.
+
+### 7.1 Authentication & 2FA
+
+- **2FA (two-step verification) must be disabled** on the EZVIZ account for v1.
+  This is the **same stance as the official `ezviz` integration**, which also does
+  not support 2FA — so it is a familiar prerequisite for our users, not a novel
+  limitation. Document it as a setup requirement in the README/config flow.
+- If 2FA is left on, login returns an MFA challenge (observed code `6002`, see §3 /
+  `reference.md` A.3) that v1 deliberately does not handle; the config flow should
+  surface a clear "disable two-step verification" error rather than failing opaquely.
+- **Fast-follow (not v1):** if `pyEzvizApi` exposes the SMS/verification-code step,
+  add an MFA step to the config flow — the `Bobsilvio/ezviz_hp7` fork shows the
+  SMS-code approach works against this same cloud API, and it would be a genuine
+  differentiator over the official integration. Tracked in `TODO.md`.
 
 ## 8. Reference implementations
 

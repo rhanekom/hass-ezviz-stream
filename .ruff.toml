@@ -26,6 +26,24 @@ ignore = [
     "D100" # Don't care all that much about docs in tests
 ]
 
+# Diagnostic / manual-test scripts under scripts/ are kept CLI tools, not shipped
+# integration code — relax docs, magic-value, exception-message-style, CLI-print
+# and subprocess-path rules (the proven logic gets ported into custom_components/
+# with full linting).
+"scripts/**/*.py" = [
+    "D100", "D101", "D103", "D107", "D205", "D209", "D213", # docstrings relaxed for CLI tools
+    "PLR2004", # magic values are fine in a protocol prototype
+    "TRY003", "EM101", "EM102", # inline exception messages are readable here
+    "FBT001", "FBT002", # boolean CLI flags
+    "ANN001", "ANN202", # partial annotations acceptable
+    "T201", # print() is the CLI's output
+    "S603", "S607", # subprocess with ffprobe/ffmpeg on PATH is intended
+    "S324", # MD5 is what the EZVIZ backend requires (not our choice)
+    "PLR0911", "PLR0913", # branchy protocol handling / CLI helper arg counts
+    "INP001", # standalone scripts, not an importable package
+    "TC003", # keep type-only imports inline for readability in scripts
+]
+
 [lint.flake8-pytest-style]
 fixture-parentheses = false
 
