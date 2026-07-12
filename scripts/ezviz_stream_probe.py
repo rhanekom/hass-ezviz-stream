@@ -193,6 +193,159 @@ def capture_camera(
     return result
 
 
+# Opcodes we already understand — excluded from the I-frame opcode sweep.
+KNOWN_OPCODES = {0x132, 0x133, 0x135, ez.MSG_STREAMINFO_REQ, ez.MSG_STREAMINFO_RSP}
+
+
+H264_SPS = b"\x00\x00\x01\x67"  # SPS NAL (nal_ref_idc=3, type=7)
+H264_IDR = b"\x00\x00\x01\x65"  # IDR slice NAL (nal_ref_idc=3, type=5)
+
+
+def _probe_one_opcode(
+    dev: dict, token: str, op: int | None, out_dir: Path, args: argparse.Namespace
+) -> dict:
+    """Open a fresh session, send candidate opcode `op` (None = control) ~1.5s in,
+    then keep reading. Measure H.264 SPS/IDR markers arriving *after* the send vs
+    before — a forced keyframe shows up as IDRs appearing only after the opcode.
+    """
+    vtdu, reader, ssn = ez.open_stream(dev, token)
+    body = b"" if args.probe_body == "empty" else (ssn.encode() if ssn else b"")
+    seg = out_dir / "probe.seg.bin"
+    state = {"fu": None}
+    transport: str | None = None
+    t0 = time.time()
+    last_ka = t0
+    deadline = t0 + args.probe_window
+    sent = op is None  # control run "sends" nothing
+    written = 0
+    send_offset = 0
+    try:
+        with seg.open("wb") as fh:
+            while time.time() < deadline:
+                if ssn and time.time() - last_ka >= 5:
+                    _send_keepalive(vtdu, ssn.encode())
+                    last_ka = time.time()
+                if not sent and time.time() - t0 >= 1.5:  # let the stream settle first
+                    with contextlib.suppress(OSError):
+                        vtdu.sendall(
+                            struct.pack(">BBHHH", ez.MAGIC, ez.CH_MSG, len(body), 0, op)
+                            + body
+                        )
+                    sent = True
+                    send_offset = written
+                frame = reader.next_frame(min(deadline, time.time() + 2))
+                if frame is None:
+                    if reader.closed:
+                        break
+                    continue
+                ch, _msg, pkt = frame
+                if ch != ez.CH_STREAM or not pkt:
+                    continue
+                if transport is None:
+                    transport = ez.detect_transport(pkt)
+                out = ez.depacketize(pkt, state) if transport == "rtp" else pkt
+                if out:
+                    fh.write(out)
+                    written += len(out)
+    finally:
+        vtdu.close()
+    data = seg.read_bytes()
+    tail = data[send_offset:]
+    return {
+        "transport": transport,
+        "idr_before": data[:send_offset].count(H264_IDR),
+        "idr_after": tail.count(H264_IDR),
+        "sps_after": tail.count(H264_SPS),
+        "jpg_size": extract_jpg(seg, out_dir / "probe.jpg", transport),
+    }
+
+
+def probe_iframe(
+    dev: dict, auth_addr: str, session_id: str, out_dir: Path, args: argparse.Namespace
+) -> None:
+    """Sweep candidate opcodes to find one that forces a keyframe on an IPC/PS cam.
+    A control(none) baseline runs first so IDRs-after-send are attributable, not luck.
+    """
+    tag = ez.mask_serial(dev["serial"])
+    candidates: list[int | None] = [None] + [
+        op for op in range(0x130, 0x146) if op not in KNOWN_OPCODES
+    ]
+    ez.log(
+        f"[probe {tag}] sweeping {len(candidates) - 1} opcodes "
+        f"(body={args.probe_body}); watching for IDRs after the send"
+    )
+    control_idr = 0
+    hits: list[str] = []
+    for op in candidates:
+        name = "control(none)" if op is None else f"0x{op:03x}"
+        try:
+            token = ez.get_vtdu_token(auth_addr, session_id, debug=args.debug)
+            r = _probe_one_opcode(dev, token, op, out_dir, args)
+        except (ez.ApiError, OSError) as exc:
+            ez.log(f"[probe {tag}] {name}: session failed ({exc})")
+            time.sleep(1)
+            continue
+        ez.log(
+            f"[probe {tag}] {name} ({r['transport']}): "
+            f"IDR before/after={r['idr_before']}/{r['idr_after']} "
+            f"SPS_after={r['sps_after']} jpg={r['jpg_size']}B"
+        )
+        if op is None:
+            control_idr = r["idr_after"]
+        # A hit: a keyframe appears after the send that the control didn't show.
+        elif r["idr_after"] > control_idr or r["jpg_size"]:
+            hits.append(name)
+            if r["jpg_size"]:
+                (out_dir / "probe.jpg").replace(out_dir / f"hit_{name}.jpg")
+        time.sleep(1)
+    (out_dir / "probe.seg.bin").unlink(missing_ok=True)
+    if hits:
+        ez.log(f"[probe {tag}] candidate I-frame opcode(s): {hits}  (see {out_dir})")
+    else:
+        ez.log(
+            f"[probe {tag}] no opcode produced an IDR "
+            f"(control IDR-after={control_idr}); try --probe-body empty / wider range"
+        )
+
+
+def _sample_transport(dev: dict, token: str, timeout: float = 6.0) -> str | None:
+    """Open a brief session just to detect the camera's transport, then close."""
+    vtdu, reader, _ssn = ez.open_stream(dev, token)
+    deadline = time.time() + timeout
+    try:
+        while time.time() < deadline:
+            frame = reader.next_frame(min(deadline, time.time() + 2))
+            if frame is None:
+                if reader.closed:
+                    break
+                continue
+            ch, _msg, body = frame
+            if ch == ez.CH_STREAM and body:
+                return ez.detect_transport(body)
+    finally:
+        vtdu.close()
+    return None
+
+
+def _select_ps_camera(
+    targets: list[dict], auth_addr: str, session_id: str, args: argparse.Namespace
+) -> dict | None:
+    """Pick the camera to probe: an explicit --serial, else the first MPEG-PS cam."""
+    if args.serial:
+        return targets[0]  # main() already filtered to the requested serial
+    for dev in targets:
+        try:
+            token = ez.get_vtdu_token(auth_addr, session_id, debug=args.debug)
+            transport = _sample_transport(dev, token)
+        except (ez.ApiError, OSError) as exc:
+            ez.log(f"sample {ez.mask_serial(dev['serial'])} failed: {exc}")
+            continue
+        ez.log(f"sample {ez.mask_serial(dev['serial'])}: transport={transport}")
+        if transport in ("mpeg-ps", "mpeg-ts"):
+            return dev
+    return None
+
+
 def _reset_out_dir(out_dir: Path) -> None:
     """Wipe the output directory so each run starts clean."""
     if out_dir.exists():
@@ -226,6 +379,20 @@ def main() -> int:
         type=int,
         default=6,
         help="max VTDU (re)connections per cam within the budget",
+    )
+    ap.add_argument(
+        "--probe-iframe",
+        action="store_true",
+        help="sweep opcodes to find an I-frame request (targets an MPEG-PS cam)",
+    )
+    ap.add_argument(
+        "--probe-window", type=float, default=10.0, help="seconds to observe per opcode"
+    )
+    ap.add_argument(
+        "--probe-body",
+        choices=("ssn", "empty"),
+        default="ssn",
+        help="body to send with each candidate opcode",
     )
     ap.add_argument(
         "--debug", action="store_true", help="dump (redacted) API responses"
@@ -265,6 +432,14 @@ def main() -> int:
     if not targets:
         ez.log("no streamable cameras to capture")
         return 1
+
+    if args.probe_iframe:
+        target = _select_ps_camera(targets, auth_addr, session_id, args)
+        if target is None:
+            ez.log("no MPEG-PS camera found to probe")
+            return 1
+        probe_iframe(target, auth_addr, session_id, out_dir, args)
+        return 0
 
     results = [
         capture_camera(dev, f"cam{i:02d}", auth_addr, session_id, out_dir, args)
