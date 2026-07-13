@@ -203,7 +203,7 @@ class EzvizCloudApi:
             cameras.append(
                 EzvizCamera(
                     serial=serial,
-                    name=resource.get("localName") or info.get("deviceName") or "",
+                    name=resource.get("localName") or info.get("name") or "",
                     category=info.get("deviceCategory", ""),
                     channel=int(info.get("channelNumber") or 1),
                     status=info.get("status"),

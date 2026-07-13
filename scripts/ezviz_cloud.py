@@ -426,7 +426,7 @@ def discover_devices(host: str, session_id: str, *, debug: bool = False) -> list
         devices.append(
             {
                 "serial": serial,
-                "name": ri.get("localName") or di.get("deviceName") or "",
+                "name": ri.get("localName") or di.get("name") or "",
                 "resource_id": resource_id,
                 "resource_type": ri.get("resourceType"),
                 "biz": ri.get("streamBizUrl", ""),

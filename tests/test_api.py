@@ -34,7 +34,6 @@ _PAGELIST = {
             "deviceSerial": "SN1",
             "resourceId": "R1",
             "resourceType": 1,
-            "localName": "Front door",
             "streamBizUrl": "biz=1",
         }
     ],
@@ -44,6 +43,7 @@ _PAGELIST = {
             "deviceCategory": "IPC",
             "channelNumber": 1,
             "status": 1,
+            "name": "Front door",  # the app-set camera name lives here
         }
     ],
     "VTM": {"R1": {"externalIp": "10.0.0.1", "port": "6001"}},
@@ -76,6 +76,7 @@ async def test_login_success_and_cameras() -> None:
     assert len(cameras) == 1
     cam = cameras[0]
     assert cam.serial == "SN1"
+    assert cam.name == "Front door"  # from deviceInfos[].name, not the serial
     assert cam.vtm_ip == "10.0.0.1"
     assert cam.vtm_port == 6001
     assert cam.biz == "biz=1"
