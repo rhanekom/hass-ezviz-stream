@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
-from homeassistant.config_entries import ConfigSubentryData
+from homeassistant.config_entries import ConfigSubentry, ConfigSubentryData
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -67,3 +67,32 @@ async def test_camera_entity_created_per_subentry(hass: HomeAssistant) -> None:
     )
     assert device is not None
     assert device.serial_number == "SN1"
+
+
+async def test_camera_created_when_subentry_added_after_setup(
+    hass: HomeAssistant,
+) -> None:
+    """A camera added as a subentry after setup gets its entity (reload listener)."""
+    entry = MockConfigEntry(domain=DOMAIN, unique_id="user@example.com", data=_ACCOUNT)
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.ezviz_stream.EzvizCloudApi",
+        return_value=AsyncMock(async_login=AsyncMock(return_value=None)),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        registry = er.async_get(hass)
+        assert registry.async_get_entity_id("camera", DOMAIN, "SN9") is None
+
+        hass.config_entries.async_add_subentry(
+            entry,
+            ConfigSubentry(
+                data={CONF_SERIAL: "SN9", CONF_VERIFICATION_CODE: ""},
+                subentry_type=CAMERA_SUBENTRY_TYPE,
+                title="New cam",
+                unique_id="SN9",
+            ),
+        )
+        await hass.async_block_till_done()
+
+    assert er.async_get(hass).async_get_entity_id("camera", DOMAIN, "SN9") is not None

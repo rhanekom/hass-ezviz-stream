@@ -57,7 +57,15 @@ def test_build_stream_url_and_set_stream_param() -> None:
     assert "stream=2" in url
     assert "dev=SN1" in url
     assert "ssn=tok" in url
+    assert "timestamp=" not in url  # omitted when not provided
     assert ysproto.set_stream_param(url, 1).count("stream=1") == 1
+
+
+def test_build_stream_url_timestamp() -> None:
+    url = ysproto.build_stream_url(
+        "1.2.3.4", 6001, "SN1", 1, "tok", stream=1, timestamp_ms=1700000000000
+    )
+    assert "&timestamp=1700000000000" in url
 
 
 # --- HEVC de-packetiser ----------------------------------------------------- #

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from .decrypt import decrypt_ps_video
@@ -45,6 +46,7 @@ _CONNECT_TIMEOUT = 10
 _HANDSHAKE_TIMEOUT = 10
 _KEEPALIVE_INTERVAL = 5.0
 _READ_SLICE = 5.0
+_RETRY_BACKOFF = 2.0  # brief pause between sessions (wakes a sleeping cam; eases CAS)
 _RECV = 65536
 _FFMPEG_FMT = {"rtp": "hevc", "mpeg-ps": "mpeg", "mpeg-ts": "mpegts"}
 _MIN_JPEG_BYTES = 5000  # smaller than a real frame => a decode artifact
@@ -135,6 +137,7 @@ async def open_stream(
         token,
         stream=stream,
         biz=camera.biz,
+        timestamp_ms=int(time.time() * 1000),
     )
     try:
         fields = await _streaminfo_exchange(vtm_reader, vtm_writer, vtm_url, None)
@@ -247,6 +250,8 @@ async def grab_jpeg(  # noqa: PLR0913 - a session needs camera, token, ffmpeg + 
     deadline = loop.time() + duration
     session = 0
     while loop.time() < deadline and session < max_sessions:
+        if session:  # brief backoff before a retry (a battery cam may still be waking)
+            await asyncio.sleep(min(_RETRY_BACKOFF, max(0.0, deadline - loop.time())))
         session += 1
         try:
             token = await token_factory()

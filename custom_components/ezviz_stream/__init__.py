@@ -45,7 +45,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: EzvizStreamConfigEntry) 
 
     entry.runtime_data = EzvizStreamData(api=api)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Reload when the entry changes so cameras added as subentries after setup get
+    # their entities created (adding a subentry updates the entry -> fires this).
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
+
+
+async def _async_update_listener(
+    hass: HomeAssistant, entry: EzvizStreamConfigEntry
+) -> None:
+    """Reload the account entry when it (or its subentries) change."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(

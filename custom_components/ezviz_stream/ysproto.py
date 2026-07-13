@@ -160,13 +160,19 @@ def build_stream_url(
     *,
     stream: int = 1,
     biz: str = "",
+    timestamp_ms: int | None = None,
 ) -> str:
-    """Build the ysproto live URL. ``stream`` selects the track (1=main, 2=sub)."""
+    """Build the ysproto live URL. ``stream`` selects the track (1=main, 2=sub).
+
+    ``timestamp_ms`` (epoch ms) is appended as ``&timestamp=`` when given - the
+    proven client sends it, and the VTM echoes the query into the VTDU redirect.
+    """
     biz_part = f"&{biz}" if biz else ""
+    ts_part = f"&timestamp={timestamp_ms}" if timestamp_ms is not None else ""
     return (
         f"ysproto://{ip}:{port}/live?"
         f"dev={serial}&chn={channel}&stream={stream}&cln={CLIENT_TYPE}"
-        f"&isp=0&auth=1&ssn={token}{biz_part}&vip=0"
+        f"&isp=0&auth=1&ssn={token}{biz_part}&vip=0{ts_part}"
     )
 
 
