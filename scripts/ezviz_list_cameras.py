@@ -6,7 +6,7 @@ status, streamability).
 
 Shares the control-plane core with ``ezviz_stream_probe.py`` (``ezviz_cloud.py``).
 Credentials come from the untracked repo-root ``.env`` (see ``.env.example``) or
-the environment; 2FA must be OFF (spec §7.1). Serials are masked in output — pass
+the environment; 2FA must be OFF (spec §7.1). Serials are masked in output - pass
 ``--full-serials`` to print them in full (they are sensitive; avoid sharing).
 """
 
@@ -69,7 +69,7 @@ def main() -> int:
     print(f"\n{len(devices)} camera(s) linked to the account:\n")
     for i, d in enumerate(devices, 1):
         status = online_map.get(d["status"], str(d["status"]))
-        vtm = f"{d['vtm_ip']}:{d['vtm_port']}" if d["streamable"] else "—"
+        vtm = f"{d['vtm_ip']}:{d['vtm_port']}" if d["streamable"] else "-"
         print(f"{i:>2}. {fmt_serial(d['serial'])}  {d['name'] or '(unnamed)'}")
         print(
             f"      status={status}  category={d['category'] or '?'}  "

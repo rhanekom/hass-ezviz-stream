@@ -9,7 +9,7 @@ attach our camera to the existing EZVIZ device card.
 
 This document is our own analysis, assembled from black-box observation of the
 EZVIZ cloud protocol and public reverse-engineering of the wire format. It is a
-reference companion to `specification.md` (the build spec) — where the two
+reference companion to `specification.md` (the build spec) - where the two
 overlap, the build spec's decisions win.
 
 > **Legend.** `<region>` = the routing code (e.g. `ieu`); serials, tokens,
@@ -18,7 +18,7 @@ overlap, the build spec's decisions win.
 
 ---
 
-## Part A — Control plane (HTTPS API)
+## Part A - Control plane (HTTPS API)
 
 The control plane is a conventional JSON-over-HTTPS API. Everything up to and
 including obtaining a stream token happens here; only then do we open a raw TCP
@@ -54,10 +54,10 @@ Common client-identity fields sent as headers and/or form fields:
 backend uses it for terminal binding and MFA. Three strategies exist in the wild:
 a fixed all-zero string, a random-but-persisted value, and a value derived from
 the host MAC (`md5(getnode())`). We should **generate once and persist** a stable
-value per install — a churning `featureCode` looks like a new terminal on every
+value per install - a churning `featureCode` looks like a new terminal on every
 login and can trip the "too many logged-in terminals" limit.
 
-**`cuName`.** Cosmetic but visible to the account owner — pick a clear brand
+**`cuName`.** Cosmetic but visible to the account owner - pick a clear brand
 string so the user can recognise and revoke our terminal.
 
 ### A.2 Region routing
@@ -68,7 +68,7 @@ short routing code. Russia is special-cased onto a different TLD
 
 | Region | Routing code | Notes |
 |--------|-------------|-------|
-| Europe / **Africa** | `ieu` | **South Africa routes here** — use region "Europe". |
+| Europe / **Africa** | `ieu` | **South Africa routes here** - use region "Europe". |
 | Asia / Singapore | `isgp` | |
 | India | `iindia` | |
 | North America / Oceania | `ius` | |
@@ -95,7 +95,7 @@ account=<email>&password=<md5-hex(password)>&featureCode=<fc>&cuName=<b64-name>
 ```
 
 - **Password** is transmitted as a **single-round MD5 hex digest** of the
-  plaintext — no salt. (This is weak, but it is what the backend expects; TLS is
+  plaintext - no salt. (This is weak, but it is what the backend expects; TLS is
   the only real transport protection.)
 - **MFA / 2FA.** If the account has 2FA enabled, login returns a challenge status
   (observed code `6002`). The flow is: request an SMS/verification code
@@ -111,15 +111,15 @@ account=<email>&password=<md5-hex(password)>&featureCode=<fc>&cuName=<b64-name>
   | `1014` | Incorrect password |
   | `1015` | Account locked |
   | `1069` | Terminal-bind limit reached (prune terminals in the app) |
-  | `1100` | Wrong region — retry against returned node |
+  | `1100` | Wrong region - retry against returned node |
   | `6002` | MFA required |
 
 **What login returns.** A session block containing:
 
-- `sessionId` — the primary bearer token. **It is a JWT** (see A.6).
-- `rfSessionId` — a refresh token used to renew the session without a full
+- `sessionId` - the primary bearer token. **It is a JWT** (see A.6).
+- `rfSessionId` - a refresh token used to renew the session without a full
   re-login.
-- A region/area block (`apiDomain`, area id/name, web domain) — the authoritative
+- A region/area block (`apiDomain`, area id/name, web domain) - the authoritative
   host.
 - User and terminal-status blocks.
 
@@ -135,9 +135,9 @@ POST /api/server/info/get      (form: sessionId, clientType)
 ```
 
 The reply (a `serverResp` object) enumerates backend nodes. The field that
-matters for streaming is **`authAddr`** — the host we later hit for the VTDU
+matters for streaming is **`authAddr`** - the host we later hit for the VTDU
 stream token (A.6). The same reply also carries a global VTM address, STUN
-addresses (for P2P/NAT traversal — not used by our TCP path), and push/TTS nodes.
+addresses (for P2P/NAT traversal - not used by our TCP path), and push/TTS nodes.
 
 > A parallel endpoint (`GET /v3/configurations/system/info`) returns a
 > pipe-delimited `sysConf` string used by the mobile persona for the CAS control
@@ -168,7 +168,7 @@ that matter to build a stream:
 | `VTM[resourceId]` → `externalIp`, `port` | **The VTM node to connect to** for this device. |
 | `VTM[resourceId]` → `publicKey.{key,version}` | The VTM's ECDH public key (only needed for the encrypted path). |
 | `deviceInfos[]` → `channelNumber` | Device channel index (the `chn` URL param). |
-| `deviceInfos[]` → `supportExt` / `ezDeviceCapability` | Capability maps. Encryption support (and ECDH v2 support) is discoverable here — used to decide whether the stream will be encrypted. |
+| `deviceInfos[]` → `supportExt` / `ezDeviceCapability` | Capability maps. Encryption support (and ECDH v2 support) is discoverable here - used to decide whether the stream will be encrypted. |
 | `deviceInfos[]` → `status`, `deviceCategory` | Online state; battery-camera classification. |
 
 ### A.6 VTDU stream token
@@ -183,7 +183,7 @@ GET {authAddr}/vtdutoken2?ssid=<sessionId>&sign=<sign>
 - `ssid` is the full `sessionId` JWT.
 - `sign` is **the `s` claim decoded from that JWT**. Because `sessionId` is a JWT,
   we base64url-decode its payload segment and read claim `s`. (No signature
-  verification is required client-side — we only need to read the claim.)
+  verification is required client-side - we only need to read the claim.)
 - The reply is `{ tokens: [...], retcode }` with `retcode == 0` on success.
   **`tokens[0]`** is the value used as the `ssn=` parameter in the stream URL.
 
@@ -199,7 +199,7 @@ GET {authAddr}/vtdutoken2?ssid=<sessionId>&sign=<sign>
   (bounded, e.g. 3 attempts).
 - **Cache and reuse.** Persist `{sessionId, rfSessionId, api host}` in the config
   entry so restarts renew rather than re-authenticate. Do not log in on every
-  reconnect — reuse the session within its TTL.
+  reconnect - reuse the session within its TTL.
 - **Logout** (optional, polite): `DELETE /v3/users/logout/v2`.
 
 ### A.8 Other useful control-plane endpoints
@@ -207,32 +207,32 @@ GET {authAddr}/vtdutoken2?ssid=<sessionId>&sign=<sign>
 Not required for the basic unencrypted stream, but relevant to features on the
 roadmap:
 
-- **Camera encryption key** — `POST /api/device/query/encryptkey` returns the
+- **Camera encryption key** - `POST /api/device/query/encryptkey` returns the
   per-camera key used to decrypt an **encrypted** stream (the user's image/video
   encryption password). `GET /v3/devconfig/authcode/query/{serial}` returns the
   sticker verification code. `PUT /v3/devices/encryptedInfo/risk` toggles/change
   encryption.
-- **Wake / alarm** (battery-camera wake, whistle, siren) —
+- **Wake / alarm** (battery-camera wake, whistle, siren) -
   `POST /api/device/cancelAlarm`, `…/sendAlarm`, `…/alarm/*`. Useful because a
   sleeping battery camera often needs a nudge before the first stream request
   succeeds.
-- **PTZ / capture** — `PUT /v3/devices/{serial}/ptzControl`,
+- **PTZ / capture** - `PUT /v3/devices/{serial}/ptzControl`,
   `PUT /v3/devconfig/v1/{serial}/{channel}/capture`.
-- **Switches** — `PUT …/switchStatus` toggles privacy, sleep, all-day recording,
+- **Switches** - `PUT …/switchStatus` toggles privacy, sleep, all-day recording,
   auto-sleep, etc.
-- **Alarms / messages** — `GET /v3/alarms/v2/advanced`,
+- **Alarms / messages** - `GET /v3/alarms/v2/advanced`,
   `GET /v3/unifiedmsg/list` for event history.
-- **Push (MQTT)** — a separate app-key/secret channel for real-time
+- **Push (MQTT)** - a separate app-key/secret channel for real-time
   notifications.
 
 ---
 
-## Part B — Media plane (streaming protocol)
+## Part B - Media plane (streaming protocol)
 
 Once we have a VTM node (A.5) and a stream token (A.6), media is obtained over a
-**custom binary TCP protocol** — not RTSP, not plain RTP. The backend calls the
-two node roles **VTM** (Video Transmission Management — effectively a load
-balancer) and **VTDU** (Video Transmission Data Unit — the node that actually
+**custom binary TCP protocol** - not RTSP, not plain RTP. The backend calls the
+two node roles **VTM** (Video Transmission Management - effectively a load
+balancer) and **VTDU** (Video Transmission Data Unit - the node that actually
 pushes media). We talk to the VTM, it redirects us to a VTDU, and the VTDU streams.
 
 ### B.1 Frame format ("VTM packet")
@@ -250,7 +250,7 @@ followed by a body:
 
 | Offset | Size | Field | Notes |
 |--------|------|-------|-------|
-| 0 | 1 | Magic | Always `0x24` (`$`) — the sync byte to hunt for during TCP reassembly. |
+| 0 | 1 | Magic | Always `0x24` (`$`) - the sync byte to hunt for during TCP reassembly. |
 | 1 | 1 | Channel | Selects message-vs-stream and plaintext-vs-encrypted (B.2). |
 | 2 | 2 | Length | Body length. |
 | 4 | 2 | Sequence | Present but, in practice, outbound sequence can be left `0`. |
@@ -286,7 +286,7 @@ notify, etc.). The ones exercised by a live "watch now" stream:
 | Opcode | Name | Use |
 |--------|------|-----|
 | `0x13B` | **StreamInfoReq** | Ask a node to start a stream (sent to VTM, then VTDU). |
-| `0x13C` | **StreamInfoRsp** | Reply — carries the VTDU redirect and stream metadata. |
+| `0x13C` | **StreamInfoRsp** | Reply - carries the VTDU redirect and stream metadata. |
 | `0x132` | **KeepAliveReq** | Keep the VTDU session alive. |
 | `0x133` | KeepAliveRsp | Keep-alive acknowledgement. |
 
@@ -299,28 +299,28 @@ encrypted handshake (`0x14A`).
 > not optional: on an RTP camera, without a periodic keep-alive the media stalls
 > after the initial parameter sets (only ~18 packets arrive); sending it every ~5 s
 > keeps hundreds of packets/second flowing. This *corrects* the earlier "keep-alive
-> is unreliable, prefer reconnect" guidance (B.11) — you need **both**.
+> is unreliable, prefer reconnect" guidance (B.11) - you need **both**.
 >
 > **No I-frame / force-IDR opcode is known.** A sweep of `0x130`–`0x145` (excl. the
 > five known opcodes), each sent on channel `0x00` with the `streamssn` body ~1.5 s
 > into a fresh session, produced **no** on-demand keyframe on an IPC camera (see the
 > IPC/GOP finding in B.11). The real opcode must be recovered by capturing the
-> official EZVIZ client (`scripts/parse_ysproto_pcap.py`) — still outstanding.
+> official EZVIZ client (`scripts/parse_ysproto_pcap.py`) - still outstanding.
 >
 > **First real-client capture (2026-07-13): the IPC cams took the LAN P2P path.**
 > In `scripts/in/EzViz_Capture.pcapng` the app streamed the powered IPC cams
 > **directly over the LAN** (phone ↔ camera `192.168.68.55`, ctrl port 9010 /
 > media 9020) using EZVIZ's private P2P protocol (magic `9e ba ac e9`, XML-
-> negotiated, stream opcode `0x3105`/`0x3106`) — **not** cloud `ysproto`. Only the
+> negotiated, stream opcode `0x3105`/`0x3106`) - **not** cloud `ysproto`. Only the
 > two **BatteryCamera** cams went via the cloud VTM/VTDU (RTP/HEVC), so the parser
 > saw only them. The one unknown **cloud** opcode, **`0x130`**, is **stream-stop/
 > teardown** (start/stop range above; sent last after the keepalives; `streamssn`
-> body; already swept → no IDR), not a force-IDR — the client sent no force-IDR on
+> body; already swept → no IDR), not a force-IDR - the client sent no force-IDR on
 > these cams. Handshake confirmed: StreamInfoReq to the VTM (`:8554`) then the VTDU
 > (`:600x`); keep-alive `0x132`/`streamssn`.
 >
 > The LAN IPC media (`0x3106`) does contain a real **SPS+PPS+IDR** cluster, so the
-> IPC cam **emits keyframes on a fresh stream start** — the cloud IPC problem is
+> IPC cam **emits keyframes on a fresh stream start** - the cloud IPC problem is
 > about how the **VTDU relays** the stream (a persistent/shared device GOP joined
 > mid-stream, plus the ~27 s drop), not the cam withholding IDRs. To find any cloud
 > force-IDR opcode (if one exists), re-capture with the phone **off the LAN**
@@ -346,36 +346,36 @@ encrypted handshake (`0x14A`).
 2. Send **StreamInfoReq** with a `ysproto://` stream URL in the body.
 3. The VTM replies with **StreamInfoRsp** whose body contains a **redirect
    `ysproto://` URL** pointing at the assigned VTDU, plus a `vtmstreamkey`.
-4. Connect to that VTDU and send **StreamInfoReq** again — same URL, now also
+4. Connect to that VTDU and send **StreamInfoReq** again - same URL, now also
    including the `vtmstreamkey`.
 5. The VTDU replies with StreamInfoRsp (result code, stream session id, and
    encryption-related fields), then begins pushing media on **channel `0x01`**.
 
 ### B.5 Message bodies (hand-rolled protobuf)
 
-The bodies are protobuf, but a minimal hand-rolled encoder/decoder suffices — we
+The bodies are protobuf, but a minimal hand-rolled encoder/decoder suffices - we
 only touch a handful of fields.
 
-**StreamInfoReq** — fields we populate:
+**StreamInfoReq** - fields we populate:
 
 | Field # | Type | Meaning | When set |
 |---------|------|---------|----------|
-| 1 | string | `streamurl` — the `ysproto://` URL | Always |
-| 2 | string | `vtmstreamkey` — key returned by VTM | Only on the VTDU request |
+| 1 | string | `streamurl` - the `ysproto://` URL | Always |
+| 2 | string | `vtmstreamkey` - key returned by VTM | Only on the VTDU request |
 | 3 | string | client/user-agent version tag | Always |
 | 4 | int32 | proxy type (`0`) | Always |
 | 6 | string | client version tag | Always |
 
-**StreamInfoRsp** — fields we read:
+**StreamInfoRsp** - fields we read:
 
 | Field # | Type | Meaning |
 |---------|------|---------|
-| 1 | int32 | `result` — `0` = OK, else an error (B.9) |
-| 4 | string | `streamssn` — stream session id (echoed in keep-alive) |
-| 5 | string | `vtmstreamkey` — key to present to the VTDU |
-| 7 | string | `streamurl` — **the VTDU redirect URL** |
-| 9 | string | `aesmd5` — MD5 bound to the AES stream key (encrypted path) |
-| 11 | string | `peerpbkey` — server ECDH public key (encrypted path) |
+| 1 | int32 | `result` - `0` = OK, else an error (B.9) |
+| 4 | string | `streamssn` - stream session id (echoed in keep-alive) |
+| 5 | string | `vtmstreamkey` - key to present to the VTDU |
+| 7 | string | `streamurl` - **the VTDU redirect URL** |
+| 9 | string | `aesmd5` - MD5 bound to the AES stream key (encrypted path) |
+| 11 | string | `peerpbkey` - server ECDH public key (encrypted path) |
 
 > A pragmatic shortcut for the VTM step: rather than fully protobuf-decoding the
 > reply, scan the body for the literal `ysproto://` and parse the VTDU host/port
@@ -395,7 +395,7 @@ ysproto://<ip>:<port>/live?dev=<serial>&chn=<channel>&stream=1&cln=<clientType>
 |-------|---------|
 | `dev` | Device serial |
 | `chn` | Device channel number (from the page list) |
-| `stream` | Stream type — `1` = main stream |
+| `stream` | Stream type - `1` = main stream |
 | `cln` | Client type (`9`) |
 | `isp` | `0` |
 | `auth` | `1` |
@@ -404,19 +404,19 @@ ysproto://<ip>:<port>/live?dev=<serial>&chn=<channel>&stream=1&cln=<clientType>
 | `vip` | `0` |
 | `timestamp` | Unix epoch milliseconds |
 
-**Key ordering matters** — the query string is assembled in a fixed order rather
+**Key ordering matters** - the query string is assembled in a fixed order rather
 than being sorted, so build it manually. Additional parameters exist for other
 modes: `e2ee=1` (encrypted channel), `weakstream=1`, `begin/end/seg` (playback),
 and a `ysudp://` scheme with `linkid=` for UDP transport (not used here).
 
 ### B.7 Media framing on the stream channel
 
-The body of each channel-`0x01` packet is **not always the same container** — it
+The body of each channel-`0x01` packet is **not always the same container** - it
 varies by camera model and firmware. Auto-detect from the first bytes:
 
 | First bytes | Transport |
 |-------------|-----------|
-| `00 00 01 BA` | MPEG-PS (pack header) — carries video **and** audio |
+| `00 00 01 BA` | MPEG-PS (pack header) - carries video **and** audio |
 | `0x47` | MPEG-TS |
 | version bits `10` in byte 0 | **RTP** (RFC 3550), dynamic HEVC |
 | *(other)* | MPEG-4 |
@@ -424,7 +424,7 @@ varies by camera model and firmware. Auto-detect from the first bytes:
 Roughly: **newer models emit RTP/H.265; a large set of (mostly older/battery)
 models emit MPEG-PS.** MPEG-PS is the only container observed to carry audio; the
 RTP models have been video-only in practice. This container variance is the single
-biggest portability risk in the pipeline — our decode path must branch on the
+biggest portability risk in the pipeline - our decode path must branch on the
 detected transport, not assume RTP.
 
 > **Verified (2026-07-13).** On our 4-camera EU test account the split ran by
@@ -433,7 +433,7 @@ detected transport, not assume RTP.
 > (`00 00 01 BA` pack headers; ffprobe confirms H.264). Both battery-cam RTP
 > streams decoded end-to-end to real JPEGs (2304×1296 and 1280×720). Detection by
 > first-bytes works, **but a reconnected session can start mid-PES** (no leading
-> pack header) and mis-detect as *unknown* — so lock the transport to the first
+> pack header) and mis-detect as *unknown* - so lock the transport to the first
 > clearly-detected value across reconnects rather than re-detecting each session.
 
 #### RTP header (12 bytes fixed)
@@ -455,12 +455,12 @@ detected transport, not assume RTP.
 - `V` (version) = 2. `P` (padding), `X` (extension), `CC` (CSRC count), `M`
   (marker = last packet of a frame), `PT` (payload type).
 - **Payload type selects codec/stream:** `PT == 96` is the dynamic **HEVC video**
-  payload — the branch we depacketize. A range of other PTs (`0`, `8`, `11`,
+  payload - the branch we depacketize. A range of other PTs (`0`, `8`, `11`,
   `100`, and a scattering of dynamic values) map to audio and are currently
   ignored. **Skip anything where `PT != 96`.**
 - Respect `CC` and `X`: payload starts at `12 + CC*4`, plus the extension block if
   `X` is set (extension length is counted in 32-bit words). In observed video
-  streams `CC=0` and `X=0`, so payload usually starts at byte 12 — but a correct
+  streams `CC=0` and `X=0`, so payload usually starts at byte 12 - but a correct
   parser honours both. The extension, when present, appears to carry
   codec/profile info set at stream start.
 
@@ -471,9 +471,9 @@ is the 6-bit field `(payload[0] >> 1) & 0x3F`:
 
 | NAL type | Meaning | Handling |
 |----------|---------|----------|
-| 32 | VPS | Parameter set — emit as a single NAL |
-| 33 | SPS | Parameter set — emit as a single NAL |
-| 34 | PPS | Parameter set — emit as a single NAL |
+| 32 | VPS | Parameter set - emit as a single NAL |
+| 33 | SPS | Parameter set - emit as a single NAL |
+| 34 | PPS | Parameter set - emit as a single NAL |
 | < 48 | Single NAL unit | Prepend start code, emit whole payload |
 | 48 | Aggregation packet (AP) | Split the 2-byte-length-prefixed sub-NALs, emit each with a start code |
 | 49 | Fragmentation unit (FU) | Reassemble across packets (below) |
@@ -486,7 +486,7 @@ append their payload (from byte 3). On the end fragment, flush the completed NAL
 
 > Reverse-engineered FU/AP handling seen in the wild is often approximate (partial
 > NAL-header reconstruction, missing AP support). Our de-packetizer implements the
-> full RFC-7798 single/AP/FU cases — that logic is the core contribution and is
+> full RFC-7798 single/AP/FU cases - that logic is the core contribution and is
 > documented in `specification.md §4.1`. The output is a clean Annex-B HEVC
 > elementary stream FFmpeg reads directly with `-f hevc`.
 
@@ -494,7 +494,7 @@ append their payload (from byte 3). On the end fragment, flush the completed NAL
 
 - **Video:** H.265/HEVC (RTP models) and H.264/AVC and HEVC inside MPEG-PS.
   Observed resolutions around 1080p–1296p at ~15 fps. *(Verified 2026-07-13:* the
-  RTP→HEVC path decodes end-to-end — real 2304×1296 and 1280×720 JPEGs off battery
+  RTP→HEVC path decodes end-to-end - real 2304×1296 and 1280×720 JPEGs off battery
   cams; MPEG-PS on IPC cams is confirmed H.264 but blocked on the keyframe interval,
   see B.11.*)*
 - **Audio:** present in MPEG-PS streams; RTP audio is unresolved (video-only in
@@ -526,7 +526,7 @@ Two independent layers exist; both are documented here for completeness but
    "permanent key" thought to derive (not be) the stream key.
 
 **Recommendation (updated 2026-07-13):** encryption support is **proven**, not a
-research item — decrypt on `0x01` with the verification code (AES-ECB; see B.11).
+research item - decrypt on `0x01` with the verification code (AES-ECB; see B.11).
 The config flow should collect the verification code for any encrypted cam and
 auto-detect whether a stream is encrypted (decrypting a clear stream corrupts it).
 
@@ -534,7 +534,7 @@ auto-detect whether a stream is encrypted (decrypting a clear stream corrupts it
 
 - **Battery cameras sleep.** The *first* stream request often returns few/zero
   video packets while the camera wakes; the act of requesting is what wakes it.
-  Retry. In practice an RTP battery cam took **~2 sessions** to yield a keyframe —
+  Retry. In practice an RTP battery cam took **~2 sessions** to yield a keyframe -
   the first session brought only the parameter sets (VPS/SPS/PPS), the second (a
   full ~27 s window) carried a decodable keyframe.
 - **~27–30 s VTDU drop.** The VTDU tears the connection roughly every half-minute
@@ -545,30 +545,30 @@ auto-detect whether a stream is encrypted (decrypting a clear stream corrupts it
   byte-spliced** into one file (each may start mid-frame/mid-PES).
 - **Keep-alive is required, not optional.** *(Corrected 2026-07-13.)* Earlier
   guidance said keep-alive was unreliable; in fact `0x132`/`streamssn` every ~5 s
-  is what keeps media flowing — without it an RTP stream stalls after the parameter
+  is what keeps media flowing - without it an RTP stream stalls after the parameter
   sets. Use keep-alive **and** the reconnect loop; they solve different problems.
-- **IPC cameras: the blocker was video encryption, not GOP length — now solved.**
+- **IPC cameras: the blocker was video encryption, not GOP length - now solved.**
   *(Resolved 2026-07-13.)* Earlier we read the IPC failure as a long keyframe
   interval on the **main** stream (a ~170 s sweep saw a single IDR). The fix has two
   parts, both proven live:
-  1. **Substream (`stream=2`)** — delivers **SPS+PPS+IDR in every ~5 s session**
+  1. **Substream (`stream=2`)** - delivers **SPS+PPS+IDR in every ~5 s session**
      (verified by the probe's per-session NAL census), so one VTDU session carries a
      full keyframe. The main stream's minutes-long GOP does not.
-  2. **Decrypt the video** — the MPEG-PS container and PPS are in the clear, but the
+  2. **Decrypt the video** - the MPEG-PS container and PPS are in the clear, but the
      **VCL slice NALs are AES-encrypted**. This is **EZVIZ Image Encryption**. The
      scheme (per `pyezvizapi.stream.decrypt_hikvision_ps_video`): **AES-ECB, no IV**,
      key = the **verification code** `.encode()` zero-padded/truncated to **16 B**;
      only the first `4096` B of each video NAL body is encrypted, starting after the
-     `nalu_header_size` codec-header bytes (**0** for these H.264 cams — the NAL
-     header itself is encrypted — vs `2` for HEVC; auto-detected by scoring trial
+     `nalu_header_size` codec-header bytes (**0** for these H.264 cams - the NAL
+     header itself is encrypted - vs `2` for HEVC; auto-detected by scoring trial
      decrypts). Decrypting before FFmpeg yields clean **H.264 768×432**.
   Net path: **substream + decrypt with the verification code**. Battery (RTP/HEVC)
-  cams need neither — their streams are in the clear. Alternatively a user can
+  cams need neither - their streams are in the clear. Alternatively a user can
   **disable Image Encryption** on the device for a clear stream. Tooling:
   `ezviz_stream_probe.py --stream 2 --verify-code <code>` (or `EZVIZ_VERIFY_CODE`).
 - **On-demand only.** Continuous streaming destroys battery runtime. Stream **only
   while a client is watching** and stop on idle (e.g. a short idle timeout after
-  the last viewer disconnects) — never 24/7.
+  the last viewer disconnects) - never 24/7.
 
 ### B.12 StreamInfoRsp error codes (`result` field)
 
@@ -592,7 +592,7 @@ auto-detect whether a stream is encrypted (decrypting a clear stream corrupts it
 
 ---
 
-## Part C — Process flow: authorisation → login → stream URL → play
+## Part C - Process flow: authorisation → login → stream URL → play
 
 ```mermaid
 sequenceDiagram
@@ -658,12 +658,12 @@ login (region-aware, MFA-aware)
 
 ---
 
-## Part D — Attaching our entity to the existing device (frontend "device merge")
+## Part D - Attaching our entity to the existing device (frontend "device merge")
 
 **Goal.** Our live-view camera should appear on the **same device card** as the
 official EZVIZ integration's entities, without depending on or modifying that
 integration. In Home Assistant, the frontend groups entities onto a device card
-purely by the **`device_id`** stamped on each entity's registry entry — so the
+purely by the **`device_id`** stamped on each entity's registry entry - so the
 task is to get our entity's registry entry to point at the *existing* device.
 
 Two distinct config entries can reference the same device. Registry entries have
@@ -673,7 +673,7 @@ config entry. The device itself is never re-created or re-owned.
 
 ### D.1 Two ways to achieve the merge
 
-**Approach 1 — shared device identifier (public, recommended for us).**
+**Approach 1 - shared device identifier (public, recommended for us).**
 We create our own entity with a `DeviceInfo` whose `identifiers` reuse the *same*
 identity the target device already has:
 
@@ -685,12 +685,12 @@ When HA registers an entity that carries `device_info`, it calls the device
 registry's get-or-create with **our** config-entry id and those identifiers.
 Because a device with that identifier already exists, HA **merges**: it adds our
 config entry to the device's owning set and stamps that device's id on our
-entity. Result — our camera lands on the existing EZVIZ device card. This uses
+entity. Result - our camera lands on the existing EZVIZ device card. This uses
 only public, documented HA APIs and degrades gracefully: if the official
 integration isn't installed, HA simply creates the device from our `device_info`
 and we still work standalone.
 
-**Approach 2 — direct device resolution + bind (what avoids co-owning the
+**Approach 2 - direct device resolution + bind (what avoids co-owning the
 device).**
 If the aim is to attach *without* adding our config entry to the device's owning
 set, resolve the real device object and bind to it instead of supplying
@@ -701,7 +701,7 @@ set, resolve the real device object and bind to it instead of supplying
    (Or let the user pick a device directly via a device selector.)
 2. Attach that resolved device to our entity **before** it is added. For entities
    created under a config entry, HA will read the entity's device reference during
-   registration and stamp its `device_id` onto our entity's registry entry — while
+   registration and stamp its `device_id` onto our entity's registry entry - while
    calling get-or-create with *our* config-entry id, so the device is **not**
    re-associated to us.
 3. For entities that are **not** created under a config entry (e.g. YAML/platform
@@ -733,7 +733,7 @@ original integration.
 ### D.3 Edge cases to handle
 
 - **Source has no device.** If the source entity isn't registry-backed or has no
-  `device_id`, skip linking — never fabricate a device. We still function as a
+  `device_id`, skip linking - never fabricate a device. We still function as a
   standalone device from our own `device_info`.
 - **Stale/removed device.** Guard every registry lookup for `None`.
 - **Idempotency.** Skip the bind when the entity is already pointed at the target
@@ -746,10 +746,10 @@ original integration.
 ### D.4 Our decision
 
 We ship our **own config flow and credentials** (we need cloud auth for the media
-handshake — we do **not** borrow another integration's session), and we link our
+handshake - we do **not** borrow another integration's session), and we link our
 camera to the existing EZVIZ device via **Approach 1** (shared `("ezviz", serial)`
 identifier) because it is the clean public-API path and works standalone. We do
 **not** add `ezviz` to our manifest dependencies and do **not** read another
 integration's private runtime data. The config flow may optionally enumerate
-existing EZVIZ devices from the public registries to pre-fill the serial picker —
+existing EZVIZ devices from the public registries to pre-fill the serial picker -
 a convenience, not a requirement.

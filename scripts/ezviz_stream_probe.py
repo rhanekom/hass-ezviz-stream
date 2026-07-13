@@ -78,7 +78,7 @@ def stream_segment(dev: dict, token: str, fh, deadline: float, stream: int = 1) 
             if frame is None:
                 if reader.closed:
                     break
-                continue  # slice timeout — loop to send the next keep-alive
+                continue  # slice timeout - loop to send the next keep-alive
             ch, _msg, body = frame
             if ch != ez.CH_STREAM or not body:
                 continue
@@ -176,7 +176,7 @@ def extract_jpg(
             dec = decrypt_ps_video(src.read_bytes(), verify_code, nalu_header_size=None)
             dpath = src.with_name(f"{src.stem}.dec.bin")
             dpath.write_bytes(dec)
-        except Exception as exc:  # noqa: BLE001 — diagnostic: log and fall back to raw
+        except Exception as exc:  # noqa: BLE001 - diagnostic: log and fall back to raw
             ez.log(f"decrypt failed ({exc!r}); trying raw decode")
         else:
             size = _ffmpeg_to_jpg(dpath, jpg, fmt)
@@ -233,7 +233,7 @@ def capture_camera(
             s, p, d = _h264_param_census(seg_path)
             ez.log(f"[{tag}]   this session: SPS={s} PPS={p} IDR={d}")
         if st["packets"] == 0:
-            ez.log(f"[{tag}] no packets (camera waking?) — retrying")
+            ez.log(f"[{tag}] no packets (camera waking?) - retrying")
             time.sleep(2)
             continue
         if st["out_bytes"] > result["bytes"]:  # remember the biggest session
@@ -257,7 +257,7 @@ def capture_camera(
     return result
 
 
-# Opcodes we already understand — excluded from the I-frame opcode sweep.
+# Opcodes we already understand - excluded from the I-frame opcode sweep.
 KNOWN_OPCODES = {0x132, 0x133, 0x135, ez.MSG_STREAMINFO_REQ, ez.MSG_STREAMINFO_RSP}
 
 
@@ -270,7 +270,7 @@ def _probe_one_opcode(
 ) -> dict:
     """Open a fresh session, send candidate opcode `op` (None = control) ~1.5s in,
     then keep reading. Measure H.264 SPS/IDR markers arriving *after* the send vs
-    before — a forced keyframe shows up as IDRs appearing only after the opcode.
+    before - a forced keyframe shows up as IDRs appearing only after the opcode.
     """
     vtdu, reader, ssn = ez.open_stream(dev, token, args.stream)
     body = b"" if args.probe_body == "empty" else (ssn.encode() if ssn else b"")

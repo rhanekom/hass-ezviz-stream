@@ -1,38 +1,38 @@
-# TODO — hass-ezviz-stream
+# TODO - hass-ezviz-stream
 
 Forward-looking action list. The authoritative *design* is `specification.md`;
-protocol findings are in `reference.md`. Keep this lean — **prune landed work rather
+protocol findings are in `reference.md`. Keep this lean - **prune landed work rather
 than accumulating it** (details live in the specs + git history).
 
 ## Repo state (2026-07-13)
 
 The **cloud streaming pipeline is proven end-to-end for both camera transports** in
 the `scripts/` diagnostic harness. There is **no HA integration code yet** in
-`custom_components/ezviz_stream/` beyond translations — building it is the focus now.
+`custom_components/ezviz_stream/` beyond translations - building it is the focus now.
 
-- `scripts/ezviz_cloud.py` — control+media core: region login, discovery, VTDU
+- `scripts/ezviz_cloud.py` - control+media core: region login, discovery, VTDU
   token, VTM/VTDU `ysproto` handshake, RTP/RFC-7798 HEVC depacketizer, transport
   auto-detect, KeepAlive (`0x132`), reconnect. (sync, `requests`.)
-- `scripts/ezviz_decrypt.py` — our own AES-ECB Image-Encryption decryptor
+- `scripts/ezviz_decrypt.py` - our own AES-ECB Image-Encryption decryptor
   (`pycryptodome`); byte-for-byte oracle-validated (`tests/test_ezviz_decrypt.py`).
-- `scripts/ezviz_stream_probe.py` · `ezviz_list_cameras.py` · `parse_ysproto_pcap.py`
-  — capture/decode probe (`--stream {1,2}`, `--verify-code`), account lister, pcap
+- `scripts/ezviz_stream_probe.py` · `ezviz_list_cameras.py` · `parse_ysproto_pcap.py`:
+  capture/decode probe (`--stream {1,2}`, `--verify-code`), account lister, pcap
   opcode parser.
 
 ## Locked decisions (details in `specification.md`)
 
-- **2FA off for v1** (§7.1) — same stance as official `ezviz`; surface a clear error
+- **2FA off for v1** (§7.1) - same stance as official `ezviz`; surface a clear error
   on the MFA challenge `6002`.
 - **Support battery + IPC cams**; decode path auto-detects transport RTP/PS/TS (§4).
-- **Own two-step config flow, own entities** — not injected into official-`ezviz`
+- **Own two-step config flow, own entities** - not injected into official-`ezviz`
   entries (§7.2): account (user/pass/region) → camera select + verification code.
-- **No runtime `pyezvizapi`** — HA core pins `==1.0.0.7`, one shared env → clash. We
+- **No runtime `pyezvizapi`** - HA core pins `==1.0.0.7`, one shared env → clash. We
   hand-roll auth+handshake and own our decryption; `pyezvizapi` is a dev-only test
   oracle (§8).
 - **Apache-2.0** licensed (matches `pyezvizapi`, from which the decrypt algo derives).
 - **Serve via go2rtc `exec:`**; default HEVC→H.264 transcode, native HEVC optional
   (§6, §6.1).
-- **On-demand only** — stream while watched, stop on idle (battery-friendly; B.11).
+- **On-demand only** - stream while watched, stop on idle (battery-friendly; B.11).
 
 Proven in `scripts/` (milestones 1–3, real cams), pending port: auth+handshake+wake
 retry; transport-detect + RTP→HEVC + PS/H.264 decode incl. substream + AES decrypt;
@@ -40,23 +40,23 @@ reconnect loop + KeepAlive.
 
 ## Now: build the integration
 
-### A. Foundation + config flow (§7.2) — DONE (2026-07-13)
+### A. Foundation + config flow (§7.2) - DONE (2026-07-13)
 
 - [x] Package scaffold: `manifest.json` (domain `ezviz_stream`, `config_flow`,
       `iot_class: cloud_polling`, `integration_type: hub`), `const.py`,
       `__init__.py` (`async_setup_entry`/`async_unload_entry`, entry `runtime_data`;
       `PLATFORMS` empty until the camera platform lands).
-- [x] `api.py` — async cloud client on HA's `aiohttp` session: `async_login`,
+- [x] `api.py` - async cloud client on HA's `aiohttp` session: `async_login`,
       `async_get_cameras`; typed errors (`InvalidAuth`, `MfaRequired` for `6002`,
       `CannotConnect`, `InvalidRegion`). Ported auth/discovery from `ezviz_cloud.py`.
-- [x] `config_flow.py` — **account entry** flow (email/pass/region, validated; MFA
+- [x] `config_flow.py` - **account entry** flow (email/pass/region, validated; MFA
       `6002` → clear error; `unique_id` = account email) + **camera subentry** flow
       (`CameraSubentryFlowHandler` via `async_get_supported_subentry_types`): pick a
       not-yet-added camera + supply **its own** verification code; `unique_id` =
-      serial (no dupes). Per-camera codes — never a shared code.
+      serial (no dupes). Per-camera codes - never a shared code.
 - [x] `strings.json` + `translations/en.json` (account step + `config_subentries.
       camera` section). `hacs.json` HA floor bumped to `2025.4.0` (subentries).
-- [x] `tests/test_config_flow.py` — account flow (happy path, invalid-auth/MFA/
+- [x] `tests/test_config_flow.py` - account flow (happy path, invalid-auth/MFA/
       cannot-connect, already-configured) + subentry flow (add camera, no-cameras-
       left). `tests/conftest.py` enables custom integrations.
 - Note: `requirements` stays `[]`; `pycryptodome`/`ffmpeg` get added with Milestone
@@ -65,7 +65,7 @@ reconnect loop + KeepAlive.
 
 ### B. Camera entity + streaming
 
-- [x] **B.1 — camera platform + entities (structural).** `camera.py`:
+- [x] **B.1 - camera platform + entities (structural).** `camera.py`:
       `async_setup_entry` creates one `EzvizStreamCamera` per camera subentry
       (`async_add_entities(..., config_subentry_id=...)`); entity `unique_id` =
       serial, device-registry linked to the official EZVIZ device via a shared
@@ -73,25 +73,31 @@ reconnect loop + KeepAlive.
       are placeholders (`async_camera_image` → None) until B.2/B.3. `PyTurboJPEG`
       added as a **dev** dep (needed to import HA's `camera` component in tests).
       Tested (`tests/test_camera.py`): entity + linked device created per subentry.
-- [x] **B.2 — pure media core + decryptor moved in.** `decrypt.py` moved into the
-      integration (git mv); `ysproto.py` added — RTP/RFC-7798 `HevcDepacketizer`,
+- [x] **B.2 - pure media core + decryptor moved in.** `decrypt.py` moved into the
+      integration (git mv); `ysproto.py` added - RTP/RFC-7798 `HevcDepacketizer`,
       `detect_transport`, frame framing (`build_frame`/`read_frame`), minimal
-      protobuf, StreamInfoReq/KeepAlive builders, stream-URL helpers — all pure/
+      protobuf, StreamInfoReq/KeepAlive builders, stream-URL helpers - all pure/
       I/O-free and unit-tested (`tests/test_ysproto.py`). `pycryptodome` moved from
       dev → runtime (`manifest.json` + `[project].dependencies`); the diagnostic
       probe now decrypts via the `pyezvizapi` oracle (dev-only). Codec/protocol
       modules got a scoped `per-file-ignores` carve-out (CLAUDE.md documented).
-- [x] **B.3a — producer control-plane (api.py).** `EzvizCamera` now carries VTM
+- [x] **B.3a - producer control-plane (api.py).** `EzvizCamera` now carries VTM
       routing (`vtm_ip`, `vtm_port`, `biz`); added `async_get_vtdu_token()` (auth-addr
       resolve + JWT-sign + `vtdutoken2`). Tested (`tests/test_api.py`: login success/
       errors/region-redirect, camera VTM fields, VTDU token).
-- [ ] **B.3b — socket driver + producer + snapshot.** **Decided: subprocess
-      producer** (go2rtc-exec path, §6). Build the async VTM→VTDU handshake driver
-      (using `ysproto` + `api`) + media loop (depacketize/decrypt) + reconnect across
-      the ~27 s drop + KeepAlive, packaged as a runnable producer writing Annex-B/
-      H.264 to stdout (creds via **env**, never argv). Wire `async_camera_image` to
-      run it → FFmpeg → JPEG (working snapshot). Substream/codec from options.
-      *(Socket path needs live-cloud verification, like the `scripts/` were.)*
+- [~] **B.3b - async streaming client + snapshot (code-complete; needs live
+      verification).** `stream.py`: async VTM/VTDU handshake over `asyncio` sockets
+      (non-blocking, so **in-process** - a subprocess is only needed for go2rtc live,
+      C), media loop (RTP depacketize / PS decrypt), reconnect across the ~27 s drop +
+      KeepAlive, and `grab_jpeg()` (reconnect until FFmpeg decodes one frame). Wired
+      `camera.async_camera_image` → `grab_jpeg` via HA's ffmpeg manager; `ffmpeg`
+      added to manifest `dependencies` (`ha-ffmpeg` + `PyTurboJPEG` are dev deps for
+      tests). `_FrameReader` unit-tested (`tests/test_stream.py`); the socket path
+      itself needs **live-cloud verification** (CI can't reach the cloud).
+    - Known tuning: the snapshot drives a brief live session, so it is slow
+      (seconds) and the 30 s budget is marginal for battery cams that need ~2
+      sessions for a keyframe (main stream). Continuous/efficient live view is
+      go2rtc (C); stream selection (main/sub) becomes an option in D.
 
 ### C. Serving
 
@@ -106,7 +112,7 @@ reconnect loop + KeepAlive.
 
 ## Later / nice-to-have
 
-- [ ] MFA / verification-code login step (a differentiator — `Bobsilvio/ezviz_hp7`
+- [ ] MFA / verification-code login step (a differentiator - `Bobsilvio/ezviz_hp7`
       shows the SMS-code approach works). 2FA fast-follow.
 - [ ] Multi-camera niceties; snapshot via the cloud path; pre-fill the camera picker
       from existing `ezviz` devices (§6.3).
@@ -115,6 +121,6 @@ reconnect loop + KeepAlive.
 
 - `uv sync` restores the venv from `uv.lock` after a rebuild.
 - `.git` ownership gotcha: setup commits can leave `.git/objects/*` root-owned,
-  blocking `git add` — fix with `sudo chown -R vscode:vscode .git`.
+  blocking `git add` - fix with `sudo chown -R vscode:vscode .git`.
 - `.env` (creds), `scripts/in/` + `scripts/out/` (captures), and `*.jpg` are
-  gitignored — keep them out of commits.
+  gitignored - keep them out of commits.

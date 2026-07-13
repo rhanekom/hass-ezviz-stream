@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from homeassistant.components.camera import Camera
+from homeassistant.components.ffmpeg import get_ffmpeg_manager
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import (
@@ -14,6 +16,14 @@ from .const import (
     MANUFACTURER,
     OFFICIAL_EZVIZ_DOMAIN,
 )
+from .stream import grab_jpeg
+
+_LOGGER = logging.getLogger(__name__)
+
+# A single-frame grab drives a brief live session; keep it short so HA's image
+# fetch does not hang. Efficient live view arrives with go2rtc (Milestone C).
+_SNAPSHOT_TIMEOUT = 30.0
+_MAIN_STREAM = 1
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigSubentry
@@ -24,7 +34,7 @@ if TYPE_CHECKING:
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,  # noqa: ARG001 — platform setup signature fixed by HA
+    hass: HomeAssistant,  # noqa: ARG001 - platform setup signature fixed by HA
     entry: EzvizStreamConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
@@ -62,8 +72,29 @@ class EzvizStreamCamera(Camera):
 
     async def async_camera_image(
         self,
-        width: int | None = None,  # noqa: ARG002 — placeholder until the producer lands
+        width: int | None = None,  # noqa: ARG002 - HA image API; we return native res
         height: int | None = None,  # noqa: ARG002
     ) -> bytes | None:
-        """Return a still image. Placeholder until the streaming producer (B.2/B.3)."""
-        return None
+        """
+        Grab a single decoded frame via a brief cloud live session.
+
+        This drives login -> handshake -> media -> decode; it is inherently slow
+        (seconds). Efficient continuous live view arrives with go2rtc (Milestone C).
+        """
+        api = self._entry.runtime_data.api
+        cameras = await api.async_get_cameras()
+        camera = next(
+            (cam for cam in cameras if cam.serial == self._serial),
+            None,
+        )
+        if camera is None:
+            _LOGGER.warning("Camera %s not found on the account", self._serial)
+            return None
+        return await grab_jpeg(
+            camera,
+            api.async_get_vtdu_token,
+            get_ffmpeg_manager(self.hass).binary,
+            stream=_MAIN_STREAM,
+            verification_code=self._verification_code,
+            duration=_SNAPSHOT_TIMEOUT,
+        )

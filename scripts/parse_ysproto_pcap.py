@@ -4,13 +4,13 @@
 Purpose: find the **I-frame / keyframe request** opcode the official EZVIZ client
 (Studio / app) sends, which isn't publicly documented (see doc/TODO.md). Capture a
 pcap while the official client live-views an IPC (MPEG-PS/H.264) camera, then run
-this on it — it reassembles each TCP stream, parses the 8-byte ysproto framing
+this on it - it reassembles each TCP stream, parses the 8-byte ysproto framing
 (magic 0x24, channel, len, seq, msgcode; see reference.md B.1), and prints every
 client→server control message with its opcode and protobuf body decoded. Any
 opcode that is NOT one we already know (StreamInfoReq/Rsp, KeepAlive) is a
 candidate I-frame request.
 
-Reads the capture directly in Python via scapy — no external tools, so it runs the
+Reads the capture directly in Python via scapy - no external tools, so it runs the
 same on Windows or in the devcontainer. Capture the pcap with Wireshark on Windows
 (it produces the .pcapng), then either run this on Windows or drop the file into
 the repo and run it in the devcontainer:
@@ -19,7 +19,7 @@ the repo and run it in the devcontainer:
 
 ⚠ The StreamInfoReq body contains your stream token (`ssn=`); review the output
 before sharing it. This tool prints bodies as hex + decoded protobuf fields so you
-can redact tokens/serials — the *opcode* itself is what we need, and it is not
+can redact tokens/serials - the *opcode* itself is what we need, and it is not
 sensitive.
 """
 
@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover
 try:
     from scapy.all import IP, TCP, PcapReader
 except ImportError:  # pragma: no cover
-    sys.exit("scapy not installed — run `uv sync` (it's a dev dependency).")
+    sys.exit("scapy not installed - run `uv sync` (it's a dev dependency).")
 
 MAGIC = 0x24
 OPCODE_NAMES = {
@@ -135,7 +135,7 @@ def main() -> int:
         if not is_client:
             continue
         found_any = True
-        print(f"\n=== {src} → {dst} (client → server) — {len(frames)} frames ===")
+        print(f"\n=== {src} → {dst} (client → server) - {len(frames)} frames ===")
         for ch, msg, body in frames:
             name = OPCODE_NAMES.get(msg, "❓ UNKNOWN")
             if msg not in KNOWN:
@@ -156,7 +156,7 @@ def main() -> int:
             print(f"  0x{op:03x}  x{n}")
         print("Share these opcode(s) + body field structure (redact any token/serial).")
     else:
-        print("  none — the client sent only known opcodes on this capture.")
+        print("  none - the client sent only known opcodes on this capture.")
     return 0
 
 

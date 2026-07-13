@@ -115,7 +115,7 @@ class EzvizStreamConfigFlow(ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_supported_subentry_types(
         cls,
-        config_entry: ConfigEntry,  # noqa: ARG003 — signature fixed by Home Assistant
+        config_entry: ConfigEntry,  # noqa: ARG003 - signature fixed by Home Assistant
     ) -> dict[str, type[ConfigSubentryFlow]]:
         """Return the subentry flows this integration supports."""
         return {CAMERA_SUBENTRY_TYPE: CameraSubentryFlowHandler}

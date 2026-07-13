@@ -1,7 +1,7 @@
 """
 Async EZVIZ cloud API client (control plane: login + camera discovery).
 
-Just the HTTPS control-plane needed for the config flow and coordinator — the
+Just the HTTPS control-plane needed for the config flow and coordinator - the
 VTM/VTDU media handshake lives in the streaming module (added with the camera
 platform). Ported from the proven sync core in ``scripts/ezviz_cloud.py`` to async
 on Home Assistant's shared ``aiohttp`` session.
@@ -30,7 +30,7 @@ _PAGELIST_PATH = (
     "/v3/userdevices/v1/resources/pagelist?filter=VTM&groupId=-1&limit=50&offset=0"
 )
 
-# Desktop/Studio client persona — load-bearing: the mobile persona doesn't reliably
+# Desktop/Studio client persona - load-bearing: the mobile persona doesn't reliably
 # surface VTM routing data (doc/reference.md A.1/A.2).
 _CLIENT: dict[str, str] = {
     "clientType": "9",

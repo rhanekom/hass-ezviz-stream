@@ -31,7 +31,7 @@ ignore = [
 ]
 
 # Diagnostic / manual-test scripts under scripts/ are kept CLI tools, not shipped
-# integration code — relax docs, magic-value, exception-message-style, CLI-print
+# integration code - relax docs, magic-value, exception-message-style, CLI-print
 # and subprocess-path rules (the proven logic gets ported into custom_components/
 # with full linting).
 "scripts/**/*.py" = [
@@ -51,7 +51,7 @@ ignore = [
 # Low-level protocol / codec modules: dense bit-twiddling (NAL-type masks, RTP
 # fields, AES block maths) where naming every mask/constant hurts readability and
 # the parse/decrypt functions are inherently branchy. Relaxed like scripts/ but
-# scoped to these specific files — the rest of the integration keeps full linting.
+# scoped to these specific files - the rest of the integration keeps full linting.
 # (See CLAUDE.md "Ruff Configuration" for the documented exception.)
 "custom_components/ezviz_stream/{decrypt,ysproto}.py" = [
     "PLR2004", # magic values (bit masks, NAL types, RTP payload types)

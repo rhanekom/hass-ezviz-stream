@@ -1,4 +1,4 @@
-# `scripts/` — EZVIZ cloud diagnostic tools
+# `scripts/` - EZVIZ cloud diagnostic tools
 
 Standalone command-line tools used to reverse-engineer and validate the EZVIZ
 cloud streaming path against **real cameras**. They are the manual test harness
@@ -24,14 +24,14 @@ the protocol details and empirical findings are in
 
 ## The tools
 
-### `ezviz_cloud.py` — shared core (library, not a CLI)
+### `ezviz_cloud.py` - shared core (library, not a CLI)
 
 The reusable control-plane + media-plane module the CLIs import: region-aware
 login, device discovery, VTDU token, the VTM/VTDU `ysproto://` binary handshake,
 the RTP/RFC-7798 HEVC de-packetizer (spec §4.1), transport auto-detection, and
 KeepAlive. Depends on `requests`.
 
-### `ezviz_list_cameras.py` — list account cameras
+### `ezviz_list_cameras.py` - list account cameras
 
 Logs in and prints every camera linked to the account with the details relevant
 to streaming (VTM node, channel, category, online status, whether it is
@@ -41,7 +41,7 @@ streamable). Serials are masked unless you pass `--full-serials`.
 uv run python scripts/ezviz_list_cameras.py
 ```
 
-### `ezviz_stream_probe.py` — capture + decode a frame per camera
+### `ezviz_stream_probe.py` - capture + decode a frame per camera
 
 Drives the full path (login → handshake → channel-0x01 media → transport-detect →
 de-packetize/dump → FFmpeg) and writes a capture plus a decoded `.jpg` per camera
@@ -72,10 +72,10 @@ I-frame request on IPC/MPEG-PS cameras (see the open item in `TODO.md`):
 uv run python scripts/ezviz_stream_probe.py --probe-iframe   # sweep 0x130–0x145
 ```
 
-### `parse_ysproto_pcap.py` — find the I-frame opcode from a capture
+### `parse_ysproto_pcap.py` - find the I-frame opcode from a capture
 
 Decodes the `ysproto` control messages out of a packet capture (taken while the
-official EZVIZ client — Studio/app — live-views a camera) and flags any
+official EZVIZ client - Studio/app - live-views a camera) and flags any
 client→server opcode we don't already know: the candidate I-frame request. Reads
 the pcap directly with `scapy` (a dev dependency), so it runs the same on Windows
 or in the devcontainer.
@@ -90,6 +90,6 @@ uv run python scripts/parse_ysproto_pcap.py capture.pcapng
 ## Output & safety
 
 - Captures and decoded frames go only to `scripts/out/` (gitignored).
-- `.env` (real credentials) is gitignored — keep it out of commits.
+- `.env` (real credentials) is gitignored - keep it out of commits.
 - These tools make real calls to the EZVIZ cloud with the account's own
   credentials against the user's own devices.

@@ -1,8 +1,8 @@
-"""EZVIZ VTM/VTDU ``ysproto`` media protocol — pure, I/O-free logic.
+"""EZVIZ VTM/VTDU ``ysproto`` media protocol - pure, I/O-free logic.
 
 Everything here is byte-in/byte-out (no sockets): the 8-byte frame framing, the
 minimal protobuf used by StreamInfoReq/Rsp, the StreamInfoReq/KeepAlive builders and
-stream-URL helpers, RTP/RFC-7798 HEVC de-packetisation (spec §4.1 — the proven core
+stream-URL helpers, RTP/RFC-7798 HEVC de-packetisation (spec §4.1 - the proven core
 contribution), and channel-0x01 transport detection. The socket driver that uses
 these lives in the streaming client (added with the producer).
 """
@@ -122,7 +122,7 @@ def read_frame(buf: bytes) -> tuple[tuple[int, int, bytes] | None, int]:
     """
     start = buf.find(bytes([MAGIC]))
     if start < 0:
-        return None, len(buf)  # no magic anywhere — discard
+        return None, len(buf)  # no magic anywhere - discard
     if len(buf) - start < HEADER_SIZE:
         return None, start  # keep the partial header
     _, channel, length, _seq, msgcode = struct.unpack(

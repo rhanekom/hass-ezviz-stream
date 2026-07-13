@@ -9,7 +9,7 @@ Reusable core for the ``scripts/`` diagnostic tools (``ezviz_stream_probe.py``,
       -> RTP/RFC-7798 de-packetize (HEVC) ; transport auto-detect
 
 Secrets (passwords, session tokens, serials) are never logged in full. 2FA must
-be OFF on the account (spec §7.1) — a 2FA account returns MFA challenge 6002,
+be OFF on the account (spec §7.1) - a 2FA account returns MFA challenge 6002,
 surfaced as a clear error rather than handled.
 """
 
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 # --------------------------------------------------------------------------- #
-# Constants (reference.md A.1/A.2, spec §3). Desktop/Studio persona — load-
+# Constants (reference.md A.1/A.2, spec §3). Desktop/Studio persona - load-
 # bearing: the mobile persona doesn't reliably surface VTM routing data.
 # --------------------------------------------------------------------------- #
 REGION_CODE = {
@@ -178,7 +178,7 @@ def scan_ysproto(body: bytes) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
-# Framed-socket reader (reference.md B.1 — bodies span TCP segments)
+# Framed-socket reader (reference.md B.1 - bodies span TCP segments)
 # --------------------------------------------------------------------------- #
 class FrameReader:
     def __init__(self, sock: socket.socket) -> None:
@@ -217,7 +217,7 @@ class FrameReader:
 
 
 # --------------------------------------------------------------------------- #
-# RTP/RFC-7798 HEVC de-packetizer — spec §4.1 (proven), and transport detection
+# RTP/RFC-7798 HEVC de-packetizer - spec §4.1 (proven), and transport detection
 # --------------------------------------------------------------------------- #
 def depacketize(body: bytes, state: dict) -> bytes:
     if len(body) < 14 or (body[0] >> 6) != 2 or (body[1] & 0x7F) != 96:
@@ -350,7 +350,7 @@ def login(
                 )
             log(f"login OK  sessionId={redact(sess)}  host={host}")
             return sess, host
-        if code == 1100:  # wrong region — retry against returned node
+        if code == 1100:  # wrong region - retry against returned node
             new_host = (body.get("loginArea") or {}).get("apiDomain")
             if not new_host:
                 raise ApiError("login: wrong region (1100) but no apiDomain to retry")
@@ -360,7 +360,7 @@ def login(
         if code == 6002:
             raise ApiError(
                 "login: account has 2FA enabled (6002). This tool requires 2FA OFF "
-                "(spec §7.1) — disable two-step verification on the EZVIZ account."
+                "(spec §7.1) - disable two-step verification on the EZVIZ account."
             )
         hints = {
             1013: "incorrect username",
@@ -462,7 +462,7 @@ def get_vtdu_token(auth_addr: str, session_id: str, *, debug: bool = False) -> s
 
 
 # --------------------------------------------------------------------------- #
-# Media plane (VTM/VTDU handshake — reference.md B.4-B.6)
+# Media plane (VTM/VTDU handshake - reference.md B.4-B.6)
 # --------------------------------------------------------------------------- #
 def build_stream_url(ip: str, port: int, dev: dict, token: str, stream: int = 1) -> str:
     """Build the ysproto live URL. ``stream`` selects the encoder track:
@@ -521,7 +521,7 @@ def open_stream(
     redirect = field_str(fields, 7)
     vtm_key = field_str(fields, 5)
     if not redirect:
-        # protobuf field 7 missing — fall back to raw scan of the concatenated strings
+        # protobuf field 7 missing - fall back to raw scan of the concatenated strings
         raw = b"".join(
             v for vals in fields.values() for v in vals if isinstance(v, bytes)
         )
@@ -538,7 +538,7 @@ def open_stream(
     # the URL back, but normalise stream= in case it was rewritten to the main track).
     redirect = set_stream_param(redirect, stream)
 
-    # 2) VTDU — reuse the redirect URL verbatim, now carrying the vtmstreamkey
+    # 2) VTDU - reuse the redirect URL verbatim, now carrying the vtmstreamkey
     log(f"connect VTDU {vtdu_ip}:{vtdu_port}")
     vtdu = socket.create_connection((vtdu_ip, int(vtdu_port)), timeout=10)
     vtdu.settimeout(5)

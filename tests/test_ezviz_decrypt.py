@@ -6,9 +6,9 @@ Two guarantees, on synthetic MPEG-PS built here (no real camera data / secrets):
   header (nalu_header_size=0, our IPC cams' case), H.264 with a clear header (1),
   and HEVC (2).
 * **Oracle equivalence:** our output is byte-for-byte identical to
-  ``pyezvizapi.stream.decrypt_hikvision_ps_video`` — the upstream implementation our
+  ``pyezvizapi.stream.decrypt_hikvision_ps_video`` - the upstream implementation our
   algorithm derives from, kept as a **dev-only** dependency (never a runtime dep;
-  HA core pins an incompatible ``pyezvizapi`` version — see doc/TODO.md).
+  HA core pins an incompatible ``pyezvizapi`` version - see doc/TODO.md).
 """
 
 from __future__ import annotations

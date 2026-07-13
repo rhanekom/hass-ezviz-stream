@@ -4,8 +4,8 @@
 Our own implementation of the decryption EZVIZ applies to its cloud/SDK MPEG-PS
 video when *Image Encryption* is ON. The MPEG-PS container (pack/system/PSM/PES
 framing) and the Annex-B NAL start codes stay in the clear; only the first
-``NAL_ENCRYPTED_PREFIX_LEN`` bytes of each **video** NAL *body* — after
-``nalu_header_size`` clear codec-header bytes — are AES-ECB encrypted, with the
+``NAL_ENCRYPTED_PREFIX_LEN`` bytes of each **video** NAL *body* - after
+``nalu_header_size`` clear codec-header bytes - are AES-ECB encrypted, with the
 camera's verification code zero-padded/truncated to 16 bytes as the key (no IV).
 
 A single NAL body can span several video PES packets, so the AES 16-byte blocks
@@ -15,7 +15,7 @@ with a clear NAL header, and ``0`` for H.264 whose NAL header is itself encrypte
 (the case observed on our IPC cams); :func:`detect_nalu_header_size` picks it.
 
 We roll our own so the integration takes **no runtime dependency on pyezvizapi**
-(HA core pins ``pyezvizapi==1.0.0.7``, which would clash — see doc/TODO.md). The
+(HA core pins ``pyezvizapi==1.0.0.7``, which would clash - see doc/TODO.md). The
 algorithm is derived from ``RenierM26/pyEzvizApi`` (Apache-2.0),
 ``pyezvizapi.stream.decrypt_hikvision_ps_video``, and is validated byte-for-byte
 against it in the test suite. Runtime dependency: ``pycryptodome`` only.
