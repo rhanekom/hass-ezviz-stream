@@ -5,7 +5,7 @@
 # frequent `scripts/setup` runs (postCreateCommand), which handle user-specific
 # and project-specific setup. Keep that split: global -> here, per-user -> setup.
 
-FROM mcr.microsoft.com/devcontainers/python:3.13
+FROM mcr.microsoft.com/devcontainers/python:3.14
 
 # Pinned versions for directly-downloaded tools.
 # Keep these in sync with the matching rev in .pre-commit-config.yaml.

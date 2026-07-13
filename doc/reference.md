@@ -292,10 +292,20 @@ notify, etc.). The ones exercised by a live "watch now" stream:
 
 Other opcodes seen but not needed for basic live view include start/stop stream
 (`0x12E`–`0x131`), playback (`0x137`–`0x13A`), and an ECDH-notify used by the
-encrypted handshake (`0x14A`). Note that keep-alive framing is finicky — some
-opcode/channel/body combinations are rejected outright by the backend; treat the
-`0x132`-on-`0x00`-with-`streamssn`-body form as the candidate and be prepared to
-fall back to reconnection (B.8) rather than relying on keep-alive.
+encrypted handshake (`0x14A`).
+
+> **Verified (2026-07-13).** `0x132` on channel `0x00` with the `streamssn` body
+> (StreamInfoRsp field 4) is the working keep-alive form, and it is **required**,
+> not optional: on an RTP camera, without a periodic keep-alive the media stalls
+> after the initial parameter sets (only ~18 packets arrive); sending it every ~5 s
+> keeps hundreds of packets/second flowing. This *corrects* the earlier "keep-alive
+> is unreliable, prefer reconnect" guidance (B.11) — you need **both**.
+>
+> **No I-frame / force-IDR opcode is known.** A sweep of `0x130`–`0x145` (excl. the
+> five known opcodes), each sent on channel `0x00` with the `streamssn` body ~1.5 s
+> into a fresh session, produced **no** on-demand keyframe on an IPC camera (see the
+> IPC/GOP finding in B.11). The real opcode must be recovered by capturing the
+> official EZVIZ client (`scripts/parse_ysproto_pcap.py`) — still outstanding.
 
 ### B.4 The handshake
 
@@ -398,6 +408,15 @@ RTP models have been video-only in practice. This container variance is the sing
 biggest portability risk in the pipeline — our decode path must branch on the
 detected transport, not assume RTP.
 
+> **Verified (2026-07-13).** On our 4-camera EU test account the split ran by
+> *camera class*, not simply age: the two **battery cameras emit RTP/H.265**
+> (`PT=96`), the two **mains-powered IPC cameras emit MPEG-PS carrying H.264**
+> (`00 00 01 BA` pack headers; ffprobe confirms H.264). Both battery-cam RTP
+> streams decoded end-to-end to real JPEGs (2304×1296 and 1280×720). Detection by
+> first-bytes works, **but a reconnected session can start mid-PES** (no leading
+> pack header) and mis-detect as *unknown* — so lock the transport to the first
+> clearly-detected value across reconnects rather than re-detecting each session.
+
 #### RTP header (12 bytes fixed)
 
 ```
@@ -455,7 +474,10 @@ append their payload (from byte 3). On the end fragment, flush the completed NAL
 ### B.9 Codecs & container summary
 
 - **Video:** H.265/HEVC (RTP models) and H.264/AVC and HEVC inside MPEG-PS.
-  Observed resolutions around 1080p–1296p at ~15 fps.
+  Observed resolutions around 1080p–1296p at ~15 fps. *(Verified 2026-07-13:* the
+  RTP→HEVC path decodes end-to-end — real 2304×1296 and 1280×720 JPEGs off battery
+  cams; MPEG-PS on IPC cams is confirmed H.264 but blocked on the keyframe interval,
+  see B.11.*)*
 - **Audio:** present in MPEG-PS streams; RTP audio is unresolved (video-only in
   practice, likely G.711 when present).
 - **Downstream:** feed the reconstructed elementary stream to FFmpeg. Default to
@@ -489,15 +511,29 @@ Treat the encrypted path as a research item.
 
 ### B.11 Operational realities
 
-- **Battery cameras sleep.** The *first* stream request often returns **zero
-  packets** while the camera wakes; the act of requesting is what wakes it. Retry
-  a few seconds later. A wake/alarm call (A.8) can help.
-- **~27–30 s VTDU drop.** The VTDU tears the connection roughly every half-minute.
-  Implement a **reconnect loop** (reuse cached session/token → re-handshake →
-  resume) and, at the serving layer, use discontinuity-tolerant segmenting so the
-  viewer doesn't see a hard stop.
-- **Keep-alive is unreliable.** Prefer a robust reconnect loop over depending on
-  keep-alive framing the backend may reject.
+- **Battery cameras sleep.** The *first* stream request often returns few/zero
+  video packets while the camera wakes; the act of requesting is what wakes it.
+  Retry. In practice an RTP battery cam took **~2 sessions** to yield a keyframe —
+  the first session brought only the parameter sets (VPS/SPS/PPS), the second (a
+  full ~27 s window) carried a decodable keyframe.
+- **~27–30 s VTDU drop.** The VTDU tears the connection roughly every half-minute
+  (**observed on every session** across all cameras). Implement a **reconnect
+  loop** (reuse cached session/token → re-handshake → resume) and, at the serving
+  layer, use discontinuity-tolerant segmenting so the viewer doesn't see a hard
+  stop. Note: reconnected sessions are independent live streams and **cannot be
+  byte-spliced** into one file (each may start mid-frame/mid-PES).
+- **Keep-alive is required, not optional.** *(Corrected 2026-07-13.)* Earlier
+  guidance said keep-alive was unreliable; in fact `0x132`/`streamssn` every ~5 s
+  is what keeps media flowing — without it an RTP stream stalls after the parameter
+  sets. Use keep-alive **and** the reconnect loop; they solve different problems.
+- **IPC cameras have a long keyframe interval.** *(Finding 2026-07-13.)* The
+  MPEG-PS/H.264 IPC cams emit keyframes only **~once every few minutes** (a
+  17-session sweep, ~170 s of sampling, saw a single IDR), and a fresh VTDU session
+  does **not** get an on-connect IDR the way RTP cams effectively do. Because the
+  ~27 s drop caps a session well below the GOP length, a single session almost
+  never contains a full keyframe — so H.264 can't decode a frame from it. Getting
+  IPC frames reliably needs an explicit **force-IDR request** (opcode unknown —
+  see B.3) or the low-GOP **substream** (`stream=2`, §B.6).
 - **On-demand only.** Continuous streaming destroys battery runtime. Stream **only
   while a client is watching** and stop on idle (e.g. a short idle timeout after
   the last viewer disconnects) — never 24/7.

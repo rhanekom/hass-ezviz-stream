@@ -138,7 +138,7 @@ current tools, check `mcpl` first.**
 
 ## Ruff Configuration
 
-All lint rules enabled (`select = ["ALL"]`) with specific exclusions. Target: Python 3.13. Max complexity: 25. Test files have relaxed rules (asserts, magic values, missing docstrings allowed). See `.ruff.toml` for details.
+All lint rules enabled (`select = ["ALL"]`) with specific exclusions. Target: Python 3.14. Max complexity: 25. Test files have relaxed rules (asserts, magic values, missing docstrings allowed). See `.ruff.toml` for details.
 
 - **Prefer inline suppression over global suppression.** To silence a lint rule in
   integration code (`custom_components/`), use a targeted inline `# noqa: <CODE>`
