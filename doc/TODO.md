@@ -1,204 +1,96 @@
 # TODO — hass-ezviz-stream
 
-The project's official todo list. Keep it current: check items off as they land,
-add new actions as they surface. The authoritative *design* lives in
-`specification.md`; this file tracks *what to do next*.
+Forward-looking action list. The authoritative *design* is `specification.md`;
+protocol findings are in `reference.md`. Keep this lean — **prune landed work rather
+than accumulating it** (details live in the specs + git history).
 
-## Repo state (as of 2026-07-13)
+## Repo state (2026-07-13)
 
-Diagnostic tooling exists and works (in `scripts/`, shared core in
-`ezviz_cloud.py`); **no integration code in `custom_components/` yet** beyond the
-skeleton. The proven protocol logic here is what gets ported into the integration.
+The **cloud streaming pipeline is proven end-to-end for both camera transports** in
+the `scripts/` diagnostic harness. There is **no HA integration code yet** in
+`custom_components/ezviz_stream/` beyond translations — building it is the focus now.
 
-- `scripts/ezviz_cloud.py` — shared control-plane + media-plane core (login,
-  discovery, VTM/VTDU `ysproto` handshake, RTP/RFC-7798 HEVC de-packetizer,
-  transport auto-detect, KeepAlive). Depends on `requests` (present via the venv).
-- `scripts/ezviz_stream_probe.py` — capture all/one camera; reconnect across the
-  ~27 s drop; decode a jpg per cam; `--probe-iframe` opcode sweep.
-- `scripts/ezviz_list_cameras.py` — list account cameras (masked serials).
-- `scripts/parse_ysproto_pcap.py` — decode ysproto control messages from a pcap to
-  find the I-frame opcode (scapy-based). **`scapy` is a dev dep** (in `uv.lock`).
+- `scripts/ezviz_cloud.py` — control+media core: region login, discovery, VTDU
+  token, VTM/VTDU `ysproto` handshake, RTP/RFC-7798 HEVC depacketizer, transport
+  auto-detect, KeepAlive (`0x132`), reconnect. (sync, `requests`.)
+- `scripts/ezviz_decrypt.py` — our own AES-ECB Image-Encryption decryptor
+  (`pycryptodome`); byte-for-byte oracle-validated (`tests/test_ezviz_decrypt.py`).
+- `scripts/ezviz_stream_probe.py` · `ezviz_list_cameras.py` · `parse_ysproto_pcap.py`
+  — capture/decode probe (`--stream {1,2}`, `--verify-code`), account lister, pcap
+  opcode parser.
 
-## ⚠ Container rebuild notes
+## Locked decisions (details in `specification.md`)
 
-- **Commit uncommitted work first.** `scripts/parse_ysproto_pcap.py`, the `scapy`
-  dev-dep (`pyproject.toml` + `uv.lock`), and this TODO update may be uncommitted —
-  commit before rebuilding so they aren't at risk.
-- After rebuild, `uv sync` restores the venv (incl. `scapy`) from `uv.lock`.
-- **`.git` ownership gotcha:** container-setup commits can leave some
-  `.git/objects/*` dirs owned by `root`, which blocks `git add` as `vscode`
-  ("insufficient permission for adding an object"). Fix:
-  `sudo chown -R vscode:vscode .git`.
-- `.env` (real creds) and `scripts/out/` (captures) are gitignored — verify they
-  stay out of any commit.
+- **2FA off for v1** (§7.1) — same stance as official `ezviz`; surface a clear error
+  on the MFA challenge `6002`.
+- **Support battery + IPC cams**; decode path auto-detects transport RTP/PS/TS (§4).
+- **Own two-step config flow, own entities** — not injected into official-`ezviz`
+  entries (§7.2): account (user/pass/region) → camera select + verification code.
+- **No runtime `pyezvizapi`** — HA core pins `==1.0.0.7`, one shared env → clash. We
+  hand-roll auth+handshake and own our decryption; `pyezvizapi` is a dev-only test
+  oracle (§8).
+- **Apache-2.0** licensed (matches `pyezvizapi`, from which the decrypt algo derives).
+- **Serve via go2rtc `exec:`**; default HEVC→H.264 transcode, native HEVC optional
+  (§6, §6.1).
+- **On-demand only** — stream while watched, stop on idle (battery-friendly; B.11).
 
-## Now / next actions
+Proven in `scripts/` (milestones 1–3, real cams), pending port: auth+handshake+wake
+retry; transport-detect + RTP→HEVC + PS/H.264 decode incl. substream + AES decrypt;
+reconnect loop + KeepAlive.
 
-- [x] **Decision: 2FA must be disabled for v1** — same stance as the official
-      `ezviz` integration. Documented in `specification.md` §7.1 (and §3). *(decided
-      2026-07-12)*
-- [x] **Decision: target both battery and normal cameras**, so the decode path
-      auto-detects transport (RTP / MPEG-PS / TS) rather than assuming RTP.
-      Documented in `specification.md` §4. *(decided 2026-07-12)*
-- [x] **Decision: own entities via our own two-step config flow** — not injecting
-      an entity into each existing official-`ezviz` config entry (that's brittle and
-      may become default HA behaviour). Flow: (1) add the main account (username +
-      password + region); (2) select camera(s) and supply the encryption key
-      (verification code) for encrypted cams. Device-registry linking (§6.3) still
-      applies. Documented in `specification.md` §7.2. *(decided 2026-07-13)*
-- [x] **Decision: do NOT take a runtime dependency on `pyezvizapi` — roll our own
-      decryption.** HA core pins `pyezvizapi==1.0.0.7` (hard `==`; that tag has no
-      `stream.py`/`cloud_stream.py`), and the maintainer's HACS integration pins
-      `1.0.4.7` — **both pre-cloud, both local-RTSP only** (neither streams from the
-      EZVIZ cloud). The cloud streaming + `decrypt_hikvision_ps_video` live in
-      `>=1.0.4.8` (1.0.5.0 current) but are wired only into pyezvizapi's **CLI**, not
-      any HA integration. HA loads one shared env and we expect users to also run the
-      official `ezviz` integration, so any `pyezvizapi` runtime dep would clash with
-      core's `==` pin. → **Implement our own AES-ECB video decryption** (scheme is
-      understood + proven: key padded to 16 B, 4096-B per-NAL prefix, `nalu_header_size`
-      auto-detect), **referencing `pyezvizapi`'s `decrypt_hikvision_ps_video` for edge
-      cases** (PES fragmentation, cross-packet AES-block accumulation, tail
-      look-alikes, HEVC vs H.264 header size). **Validate against the library as a
-      dev-only oracle** (it's already a dev dep — differential-test our output vs
-      theirs on captured samples). Keep our hand-rolled auth + handshake. Only new
-      runtime dep: `pycryptodome` (widely present, loosely pinned → low conflict
-      risk). *(decided 2026-07-13; see review below)*
-    - [x] **DONE:** `scripts/ezviz_decrypt.py` implements `decrypt_ps_video` +
-          `detect_nalu_header_size` (pycryptodome only). Validated **byte-for-byte
-          against the pyezvizapi oracle** on a real captured IPC sample and via
-          `tests/test_ezviz_decrypt.py` (round-trip + oracle-equivalence for
-          `nalu_header_size` 0/1/2 on synthetic MPEG-PS). The probe now decrypts via
-          our module (no runtime pyezvizapi); live end-to-end decode confirmed.
-          Ports to `custom_components/ezviz_stream/` at milestone 6.
-- [x] **Decision: license this project Apache-2.0** (was MIT) to match `pyezvizapi`
-      (Apache-2.0), from which our decryption algorithm derives — avoids license-
-      compatibility questions. `LICENSE` = Apache-2.0 text; `NOTICE` carries the
-      attribution; `pyproject.toml` `license`/`license-files` set; SPDX + attribution
-      kept in `scripts/ezviz_decrypt.py`. *(decided 2026-07-13)*
-- [x] **Prove the end-to-end cloud stream against real cameras** (§9 milestones
-      1–3) — **done for BOTH transports** (RTP/HEVC battery cams and MPEG-PS/H.264
-      IPC cams, the latter with substream + decryption; see the RESOLVED item below).
-      Via the kept diagnostic tools `scripts/ezviz_stream_probe.py` +
-      `ezviz_list_cameras.py` (shared core in `ezviz_cloud.py`). Login → handshake
-      → channel-0x01 → transport-detect → depacketize/dump → FFmpeg → jpg per cam.
-      Test account: 4 cams (2 BatteryCamera, 2 IPC), all online. *(2026-07-12)*
-    - [x] **RTP / HEVC cameras (both battery cams): FULLY WORKING.** Real frames
-          decoded — cam01 **2304×1296**, cam02 **1280×720** jpgs. Needed:
-          periodic **KeepAlive** (`0x132`) to keep media flowing (without it the
-          stream stalled after param sets), and typically **2 sessions** (first
-          wakes the cam / yields only VPS+SPS+PPS, second carries a keyframe).
-    - [x] **Reconnect loop (milestone 3): implemented + proven.** The tool
-          reconnects across the ~27 s VTDU drop; a per-session min-JPEG-size gate
-          rejects decode artifacts (an earlier 206 B "frame").
-    - [x] **Transport auto-detect proven for both:** battery cams → RTP/HEVC;
-          IPC cams → **MPEG-PS carrying H.264** (ffprobe confirms the codec).
-    - [x] **RESOLVED: IPC / MPEG-PS frames now decode end-to-end.** *(2026-07-13.)*
-          Root cause was **EZVIZ Image Encryption**, not GOP length. Fix has two
-          parts, both proven live against IPC cam `F123…77`:
-        1. **Substream (`--stream 2`)** — the main stream's keyframe interval is
-           minutes; the substream delivers **SPS+PPS+IDR every ~5 s session** (per
-           the probe's NAL census), so a single VTDU session carries a full keyframe.
-        2. **Decrypt the video** — the MPEG-PS container and PPS are in the clear,
-           but the **VCL slice NALs are AES-ECB encrypted** (NAL header included →
-           `nalu_header_size=0`, auto-detected), key = the **verification code**
-           zero-padded to 16 B. Decrypting with `pyezvizapi.stream.
-           decrypt_hikvision_ps_video` before FFmpeg yields clean **H.264 768×432**.
-           `ezviz_stream_probe.py --stream 2 --verify-code <code>` (or
-           `EZVIZ_VERIFY_CODE` in `.env`) decodes a real frame in **one session**.
-        - The battery (RTP/HEVC) cams decoded all along because their streams are in
-          the clear; these IPC cams have encryption ON. The earlier "long GOP / need
-          an I-frame opcode" reading was a symptom, not the cause.
-        - **Decision surfaced:** `pyezvizapi` (already the planned auth dep) ships a
-          *complete* cloud-stream stack (`VtmStreamClient`, `cloud_stream.py`,
-          decryption). Revisit spec §4/§9 build-vs-buy: we may use its cloud_stream
-          end-to-end rather than only porting our hand-rolled handshake/depacketizer.
-        - Tooling landed 2026-07-13: `--stream {1,2}` selector, `--verify-code`
-          (+`EZVIZ_VERIFY_CODE`) decrypt-before-decode (falls back to raw), a
-          per-session **SPS/PPS/IDR census** log, and a transport-lock fix
-          (unambiguous PS/TS magic now beats the weak RTP heuristic — a mid-PES
-          `0x83` byte had mislocked transport to `rtp`).
-        - [x] **Empirical I-frame opcode sweep — negative.** `ezviz_stream_probe.py
-              --probe-iframe` sweeps opcodes `0x130`–`0x145` (excl. the 5 known),
-              sending each ~1.5 s into a fresh session and counting H.264 SPS/IDR
-              markers after the send vs a control. **No opcode (ssn body) forced an
-              IDR.** *(2026-07-12)*
-        - [~] **Chosen route: capture the official EZVIZ client.** Capture a pcap
-              while EZVIZ Studio live-views an IPC cam, then run
-              `scripts/parse_ysproto_pcap.py <cap.pcapng>` (scapy-based, cross-
-              platform) — it decodes the ysproto control messages and flags any
-              unknown client→server opcode (the I-frame request).
-            - [x] **First capture (`scripts/in/EzViz_Capture.pcapng`, 2026-07-13):
-                  the IPC cams streamed over LAN P2P, so the cloud path carried only
-                  the battery cams.** The phone (`192.168.68.83`) reached the powered
-                  IPC cams **directly over the LAN** (camera `192.168.68.55`, ctrl
-                  port 9010 / media 9020) via EZVIZ's private P2P protocol (magic
-                  `9e ba ac e9`, XML-negotiated, stream opcode `0x3105`/`0x3106`) —
-                  a **different protocol from cloud `ysproto`**. Only the two
-                  BatteryCamera cams (BH86…60, BH86…07) went via the cloud VTM/VTDU
-                  (RTP/HEVC), so the ysproto parser saw only them. The one unknown
-                  **cloud** opcode, **`0x130`**, is **stream-stop/teardown** (start/
-                  stop range `0x12E`–`0x131`, ref §B.3; sent last after the
-                  keepalives; `streamssn` body; already swept → no IDR), not a
-                  force-IDR; the client sent no force-IDR on these cams. Handshake +
-                  keep-alive `0x132`/`streamssn` confirmed to match ours.
-                - Bonus: the LAN IPC media (`0x3106`) contains a real
-                  **SPS+PPS+IDR** cluster — so the IPC cam **does** emit keyframes on
-                  a fresh stream start. The cloud IPC failure is therefore about how
-                  the **VTDU relays** the stream (likely a persistent/shared device
-                  GOP joined mid-stream + the ~27 s drop), not the cam withholding
-                  IDRs.
-            - [ ] **Re-capture an IPC cam ON THE CLOUD PATH.** The app uses LAN P2P
-                  whenever the phone shares the camera's network, so **turn the
-                  phone's Wi-Fi off (cellular only)** — or capture from a network that
-                  can't reach the cam — to force it through VTM/VTDU. Then live-view
-                  the online IPC cam (**G145…96**; `F123…77` was `status=2`/asleep)
-                  and re-run the parser.
-        - [ ] Other routes if that stalls: (b) use the **substream (`stream=2`)** —
-              short GOP → keyframe within one session (lower res); or (c) accept
-              **RTP-only for v1** and defer PS. Not yet tried: `--probe-body empty`
-              / wider opcode range (low expected yield).
-        - Spec §4: mark the PS branch **capture-proven but not frame-proven**.
-- [ ] **Authentication & 2FA fast-follow (not v1):**
-    - [ ] Verify whether `RenierM26/pyEzvizApi` exposes an MFA / verification-code
-          step in its login flow.
-    - [ ] If it does, add an MFA-code step to our config flow (the
-          `Bobsilvio/ezviz_hp7` fork proves the SMS-code approach works against the
-          same cloud API). Would be a real differentiator.
-- [ ] **Config flow must surface a clear "disable two-step verification" error**
-      when login returns the MFA challenge (code `6002`).
+## Now: build the integration
 
-## Build milestones (from spec §9)
+### A. Foundation + config flow (§7.2) — DONE (2026-07-13)
 
-Milestones 1–3 are **proven in the `scripts/` diagnostic tools** (against real
-cameras); they still need **porting into `custom_components/ezviz_stream/`** as the
-actual integration.
+- [x] Package scaffold: `manifest.json` (domain `ezviz_stream`, `config_flow`,
+      `iot_class: cloud_polling`, `integration_type: hub`), `const.py`,
+      `__init__.py` (`async_setup_entry`/`async_unload_entry`, entry `runtime_data`;
+      `PLATFORMS` empty until the camera platform lands).
+- [x] `api.py` — async cloud client on HA's `aiohttp` session: `async_login`,
+      `async_get_cameras`; typed errors (`InvalidAuth`, `MfaRequired` for `6002`,
+      `CannotConnect`, `InvalidRegion`). Ported auth/discovery from `ezviz_cloud.py`.
+- [x] `config_flow.py` — user step (email/pass/region, validated) → cameras step
+      (multi-select + shared verification code); MFA `6002` → clear error;
+      `unique_id` = account email.
+- [x] `strings.json` + `translations/en.json`.
+- [x] `tests/test_config_flow.py` — happy path, invalid-auth/MFA/cannot-connect,
+      no-cameras + already-configured aborts (mocked api). `tests/conftest.py`
+      enables custom integrations.
+- Note: `requirements` stays `[]` and `pycryptodome`/`ffmpeg` get added with
+      Milestone B (when the decryptor + streaming move into the integration).
 
-1. [x] **Auth + handshake** → VTDU socket streaming channel-0x01 packets, with
-   wake-retry. Proven in `ezviz_cloud.py` (we implement the handshake ourselves;
-   `pyEzvizApi` still to be adopted for the integration's auth layer).
-2. [x] **Detect transport + de-packetize** (§4) → RTP branch (RFC-7798 → HEVC) and
-   **PS branch both frame-proven**. PS/TS dumps raw for FFmpeg; encrypted IPC PS is
-   AES-decrypted (verification code) before decode. Substream (`stream=2`) gives PS
-   cams a keyframe per session.
-3. [x] **Reconnect loop + KeepAlive** → proven (`ezviz_stream_probe.py`);
-   KeepAlive is `0x132` (not `0x135`) and is required to keep media flowing.
-4. [ ] **Serve** → wire into go2rtc `exec:` source (decided path, §6); add the
-   HEVC→H.264 transcode option (default on; native HEVC as a config option, §6.1).
-5. [ ] **HA entity + config flow** → creds / serial(s) / region / codec option;
-   on-demand start/stop; device-link the camera to the official integration's
-   device via matching `device_info` identifier (§6.3).
-6. [ ] **Port the proven `scripts/` logic into `custom_components/ezviz_stream/`**
-   (the integration proper) — currently only diagnostic tools exist.
+### B. Camera entity + streaming
 
-## Nice-to-haves / later (spec §9.6)
+- [ ] Async streaming module: port the handshake + RTP depacketizer + PS decrypt
+      from `scripts/` into `custom_components/` (async sockets / executor), with the
+      reconnect loop + KeepAlive and on-demand start/stop. Move `ezviz_decrypt.py`
+      in (add `pycryptodome` to `manifest.json` + `[project].dependencies`).
+- [ ] `camera.py` — Camera entity; device-registry link to the official device
+      (§6.3); substream/codec from options; on-demand.
+- [ ] Tests (mock HA + sockets).
 
-- [ ] Multi-camera support.
-- [x] Video decryption for cams with Image Encryption ON — **PROVEN** via
-      `pyezvizapi.stream.decrypt_hikvision_ps_video` (AES-ECB, key = verification
-      code padded to 16 B). Required (not optional) for our IPC test cams. **Still
-      to do in the integration:** config flow must collect the verification code per
-      encrypted cam, and we should auto-detect encryption rather than always trying
-      to decrypt (decrypting a clear stream corrupts it).
-- [ ] Snapshot via the same cloud path.
-- [ ] Config-flow convenience: enumerate existing `ezviz` devices to pre-fill the
-      serial picker (§6.3).
+### C. Serving
+
+- [ ] go2rtc `exec:` source emitting Annex-B; HEVC→H.264 transcode default-on,
+      native HEVC as an option (§6.1).
+
+### D. Polish
+
+- [ ] Options flow (codec, main/sub stream); reauth flow; diagnostics.
+- [ ] `hassfest` + HACS validation green (CI `validate.yml`).
+- [ ] README / docs: install + configuration.
+
+## Later / nice-to-have
+
+- [ ] MFA / verification-code login step (a differentiator — `Bobsilvio/ezviz_hp7`
+      shows the SMS-code approach works). 2FA fast-follow.
+- [ ] Multi-camera niceties; snapshot via the cloud path; pre-fill the camera picker
+      from existing `ezviz` devices (§6.3).
+
+## Container rebuild notes
+
+- `uv sync` restores the venv from `uv.lock` after a rebuild.
+- `.git` ownership gotcha: setup commits can leave `.git/objects/*` root-owned,
+  blocking `git add` — fix with `sudo chown -R vscode:vscode .git`.
+- `.env` (creds), `scripts/in/` + `scripts/out/` (captures), and `*.jpg` are
+  gitignored — keep them out of commits.

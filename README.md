@@ -1,8 +1,8 @@
 # EZVIZ Stream
 
-A Home Assistant custom integration (`ezviz_stream`) that provides a live video
-stream from EZVIZ **battery** cameras via the EZVIZ **cloud** — for models that
-have no local RTSP.
+A Home Assistant custom integration (`ezviz_stream`) that streams EZVIZ cameras
+live via the EZVIZ **cloud** — including **battery** cameras that expose no local
+RTSP, and cameras with **Image Encryption** enabled.
 
 > **⚠️ Work in progress — not yet functional.** The design is settled and the core
 > decode logic is proven, but the integration does not yet stream. See
@@ -10,11 +10,12 @@ have no local RTSP.
 
 ## Why this exists
 
-EZVIZ's battery cameras (e.g. the HP2/HP7 doorbells and similar) don't expose a
-local RTSP feed, so the official Home Assistant `ezviz` integration — which is
-local-RTSP only — can't show their live view. This integration reaches the same
-cameras the way the EZVIZ app does: over the cloud. See
-[`doc/specification.md` §1](./doc/specification.md) for the full rationale.
+The official Home Assistant `ezviz` integration shows live view over the camera's
+**local RTSP** stream. That leaves gaps: battery cameras (e.g. HP2/HP7 doorbells)
+run no persistent RTSP server, and any camera unreachable on Home Assistant's LAN
+can't be viewed. This integration reaches the cameras the way the EZVIZ app does —
+over the **cloud** — and decrypts the video for cameras with Image Encryption on.
+See [`doc/specification.md` §1](./doc/specification.md) for the full rationale.
 
 ## How it works
 
@@ -23,18 +24,23 @@ The proven pipeline (design in [`doc/specification.md`](./doc/specification.md))
 ```text
 EZVIZ cloud login → device list → VTDU tokens        # control plane (auth)
   → VTM/VTDU binary handshake (ysproto://)           # obtain a media socket
-  → channel-0x01 RTP packets → RTP/RFC-7798 depacketize → Annex-B HEVC
-  → FFmpeg (default: HEVC→H.264 transcode) → HA camera
+  → channel-0x01 media, transport auto-detected:
+      • RTP / RFC-7798  → Annex-B HEVC                  (battery cams)
+      • MPEG-PS → H.264, AES-decrypted if encrypted     (IPC cams)
+  → FFmpeg (default: → H.264 transcode) → go2rtc → HA camera
 ```
 
 Key decisions:
 
-- **Auth** is delegated to [`RenierM26/pyEzvizApi`](https://github.com/RenierM26/pyEzvizApi)
-  (login / device list / tokens); only the VTM/VTDU socket handshake is
-  implemented here.
-- **De-packetizer** — the RTP→HEVC logic ([spec §4.1](./doc/specification.md)) is
-  the core contribution and is ported verbatim from proven code.
-- **Codec** — defaults to on-demand HEVC→H.264 transcode (works in all browsers);
+- **Auth + handshake are hand-rolled** — the integration takes **no runtime
+  dependency on `pyezvizapi`** (Home Assistant core pins an incompatible version of
+  it for the official integration; a shared environment can't satisfy both). See
+  [spec §8](./doc/specification.md).
+- **De-packetizer + decryption are the core contribution** — the RTP→HEVC logic
+  ([spec §4.1](./doc/specification.md)) and our own AES-ECB Image-Encryption
+  decryptor (validated byte-for-byte against `pyezvizapi`). `pyezvizapi` is kept
+  only as a **dev-only decryption test oracle**.
+- **Codec** — defaults to on-demand →H.264 transcode (works in all browsers);
   native HEVC is available as a config option (Safari/iOS).
 - **Serving** — go2rtc `exec:` source, for on-demand start/stop and fan-out.
 - **Battery-friendly** — streams *only* while a client is watching, never 24/7,
@@ -46,6 +52,8 @@ Key decisions:
 - An EZVIZ cloud account with **two-step verification disabled** (same constraint
   as the official `ezviz` integration for v1 — see
   [spec §7.1](./doc/specification.md)).
+- For any camera with **Image Encryption** enabled, its **verification code** (the
+  6-character code on the camera label) — entered per camera during setup.
 - `ffmpeg` available to Home Assistant (bundled with the standard HA install).
 
 ## Installation
@@ -58,8 +66,9 @@ Via [HACS](https://hacs.xyz) as a custom repository:
 1. HACS → **Integrations** → ⋮ → **Custom repositories**.
 2. Add this repository's URL with category **Integration**.
 3. Install **EZVIZ Stream** and restart Home Assistant.
-4. Add the integration from **Settings → Devices & Services** and enter your
-   EZVIZ credentials.
+4. Add the integration from **Settings → Devices & Services**. Setup is two steps:
+   first your EZVIZ **account** (email, password, region); then **select the
+   cameras** to add and supply the **verification code** for any encrypted ones.
 
 ## Development
 
@@ -96,7 +105,9 @@ lands with tests**, enforced by a `pytest` pre-commit hook. See
 
 Built on the work of others who reverse-engineered the EZVIZ cloud protocol:
 
-- [`RenierM26/pyEzvizApi`](https://github.com/RenierM26/pyEzvizApi) — cloud auth / API.
+- [`RenierM26/pyEzvizApi`](https://github.com/RenierM26/pyEzvizApi) — cloud protocol
+  reference; our decryption algorithm derives from it (Apache-2.0), and it serves as
+  a dev-only decryption test oracle (no runtime dependency).
 - [`RenierM26/ha-ezviz`](https://github.com/RenierM26/ha-ezviz) — the official
   HACS EZVIZ integration (local-RTSP only).
 - [`ESJavadex/ezviz-ha-addon`](https://github.com/ESJavadex/ezviz-ha-addon) —
@@ -110,4 +121,4 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## License
 
-[MIT](./LICENSE).
+[Apache-2.0](./LICENSE) (see also [`NOTICE`](./NOTICE)).
