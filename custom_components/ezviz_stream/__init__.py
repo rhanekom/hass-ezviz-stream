@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -18,12 +19,17 @@ if TYPE_CHECKING:
 
 PLATFORMS: list[Platform] = [Platform.CAMERA]
 
+# EZVIZ rejects a burst of concurrent VTDU sessions (result 5405/5452), which a
+# dashboard of camera cards would trigger. Serialise streaming account-wide.
+MAX_CONCURRENT_STREAMS = 1
+
 
 @dataclass
 class EzvizStreamData:
     """Runtime data stored on the config entry."""
 
     api: EzvizCloudApi
+    stream_semaphore: asyncio.Semaphore
 
 
 type EzvizStreamConfigEntry = ConfigEntry[EzvizStreamData]
@@ -43,7 +49,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: EzvizStreamConfigEntry) 
     except CannotConnect as err:
         raise ConfigEntryNotReady(str(err)) from err
 
-    entry.runtime_data = EzvizStreamData(api=api)
+    entry.runtime_data = EzvizStreamData(
+        api=api, stream_semaphore=asyncio.Semaphore(MAX_CONCURRENT_STREAMS)
+    )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     # Reload when the entry changes so cameras added as subentries after setup get
     # their entities created (adding a subentry updates the entry -> fires this).

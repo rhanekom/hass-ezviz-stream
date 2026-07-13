@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from homeassistant.components.camera import Camera
@@ -23,7 +25,11 @@ _LOGGER = logging.getLogger(__name__)
 # A single-frame grab drives a brief live session; keep it short so HA's image
 # fetch does not hang. Efficient live view arrives with go2rtc (Milestone C).
 _SNAPSHOT_TIMEOUT = 30.0
+_SNAPSHOT_MAX_SESSIONS = 3  # limit reconnect churn per image request
 _MAIN_STREAM = 1
+# Serve a cached frame for this long so HA's image polling does not re-stream on
+# every poll (each grab is a full cloud session).
+_SNAPSHOT_CACHE_TTL = 30.0
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigSubentry
@@ -61,6 +67,9 @@ class EzvizStreamCamera(Camera):
         self._serial: str = subentry.data[CONF_SERIAL]
         self._verification_code: str = subentry.data.get(CONF_VERIFICATION_CODE, "")
         self._attr_unique_id = self._serial
+        self._image: bytes | None = None  # last decoded frame (snapshot cache)
+        self._image_at = 0.0
+        self._image_lock = asyncio.Lock()  # dedupe concurrent grabs for this camera
         # Reuse the official `ezviz` device identifier so we land on the same device
         # card when that integration is installed, and stand alone otherwise (§6.3).
         self._attr_device_info = DeviceInfo(
@@ -76,25 +85,51 @@ class EzvizStreamCamera(Camera):
         height: int | None = None,  # noqa: ARG002
     ) -> bytes | None:
         """
-        Grab a single decoded frame via a brief cloud live session.
+        Return a recent frame, grabbing one via a brief cloud session if stale.
 
-        This drives login -> handshake -> media -> decode; it is inherently slow
-        (seconds). Efficient continuous live view arrives with go2rtc (Milestone C).
+        Grabbing drives login -> handshake -> media -> decode (seconds), so results
+        are cached for ``_SNAPSHOT_CACHE_TTL`` and grabs are serialised account-wide
+        (a dashboard of cameras must not open concurrent VTDU sessions). On failure
+        the last known frame is returned. Continuous live view arrives with go2rtc.
         """
-        api = self._entry.runtime_data.api
-        cameras = await api.async_get_cameras()
-        camera = next(
-            (cam for cam in cameras if cam.serial == self._serial),
-            None,
-        )
-        if camera is None:
-            _LOGGER.warning("Camera %s not found on the account", self._serial)
-            return None
-        return await grab_jpeg(
-            camera,
-            api.async_get_vtdu_token,
-            get_ffmpeg_manager(self.hass).binary,
-            stream=_MAIN_STREAM,
-            verification_code=self._verification_code,
-            duration=_SNAPSHOT_TIMEOUT,
-        )
+        if (
+            self._image is not None
+            and time.monotonic() - self._image_at < _SNAPSHOT_CACHE_TTL
+        ):
+            return self._image
+
+        async with self._image_lock:
+            # Another waiter may have just refreshed while we waited for the lock.
+            if (
+                self._image is not None
+                and time.monotonic() - self._image_at < _SNAPSHOT_CACHE_TTL
+            ):
+                return self._image
+
+            api = self._entry.runtime_data.api
+            camera = next(
+                (
+                    cam
+                    for cam in await api.async_get_cameras()
+                    if cam.serial == self._serial
+                ),
+                None,
+            )
+            if camera is None:
+                _LOGGER.warning("Camera %s not found on the account", self._serial)
+                return self._image
+
+            async with self._entry.runtime_data.stream_semaphore:
+                jpeg = await grab_jpeg(
+                    camera,
+                    api.async_get_vtdu_token,
+                    get_ffmpeg_manager(self.hass).binary,
+                    stream=_MAIN_STREAM,
+                    verification_code=self._verification_code,
+                    duration=_SNAPSHOT_TIMEOUT,
+                    max_sessions=_SNAPSHOT_MAX_SESSIONS,
+                )
+            if jpeg is not None:
+                self._image = jpeg
+                self._image_at = time.monotonic()
+            return self._image

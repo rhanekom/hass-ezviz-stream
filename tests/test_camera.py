@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -11,6 +13,8 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.ezviz_stream.api import EzvizCamera
+from custom_components.ezviz_stream.camera import EzvizStreamCamera
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_REGION,
@@ -96,3 +100,49 @@ async def test_camera_created_when_subentry_added_after_setup(
         await hass.async_block_till_done()
 
     assert er.async_get(hass).async_get_entity_id("camera", DOMAIN, "SN9") is not None
+
+
+async def test_snapshot_cached_within_ttl(hass: HomeAssistant) -> None:
+    """A second image request within the TTL is served from cache (no re-grab)."""
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(
+        return_value=[
+            EzvizCamera(
+                "SN1",
+                "Front door",
+                "IPC",
+                1,
+                1,
+                streamable=True,
+                vtm_ip="1.1.1.1",
+                vtm_port=6001,
+            )
+        ]
+    )
+    entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(api=api, stream_semaphore=asyncio.Semaphore(1))
+    )
+    subentry = SimpleNamespace(
+        data={CONF_SERIAL: "SN1", CONF_VERIFICATION_CODE: ""},
+        title="Front door",
+        subentry_id="x",
+    )
+    camera = EzvizStreamCamera(entry, subentry)
+    camera.hass = hass
+
+    with (
+        patch(
+            "custom_components.ezviz_stream.camera.grab_jpeg",
+            AsyncMock(return_value=b"J" * 6000),
+        ) as grab,
+        patch(
+            "custom_components.ezviz_stream.camera.get_ffmpeg_manager",
+            return_value=SimpleNamespace(binary="ffmpeg"),
+        ),
+    ):
+        first = await camera.async_camera_image()
+        second = await camera.async_camera_image()
+
+    assert first == b"J" * 6000
+    assert second == first
+    assert grab.call_count == 1  # second call served from cache
