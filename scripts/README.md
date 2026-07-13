@@ -52,6 +52,17 @@ the ~27 s VTDU drop and sends periodic KeepAlive.
 uv run python scripts/ezviz_stream_probe.py                 # all streamable cams
 uv run python scripts/ezviz_stream_probe.py --serial <SN>   # one camera
 uv run python scripts/ezviz_stream_probe.py --duration 120  # bigger reconnect budget
+uv run python scripts/ezviz_stream_probe.py --stream 2      # sub-stream (short GOP)
+```
+
+For **IPC cams with Image Encryption ON**, use the low-GOP sub-stream and pass the
+camera's verification code so the AES-encrypted H.264 is decrypted before FFmpeg
+(uses `pyezvizapi`). One shared code can cover all encrypted cams via
+`EZVIZ_VERIFY_CODE` in `.env`:
+
+```bash
+uv run python scripts/ezviz_stream_probe.py --serial <SN> --stream 2 \
+    --verify-code <6-LETTER-CODE>     # or set EZVIZ_VERIFY_CODE in .env
 ```
 
 It also has an experimental opcode-sweep mode used to hunt for an on-demand

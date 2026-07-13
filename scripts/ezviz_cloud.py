@@ -19,6 +19,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import socket
 import struct
 import time
@@ -463,14 +464,24 @@ def get_vtdu_token(auth_addr: str, session_id: str, *, debug: bool = False) -> s
 # --------------------------------------------------------------------------- #
 # Media plane (VTM/VTDU handshake — reference.md B.4-B.6)
 # --------------------------------------------------------------------------- #
-def build_stream_url(ip: str, port: int, dev: dict, token: str) -> str:
+def build_stream_url(ip: str, port: int, dev: dict, token: str, stream: int = 1) -> str:
+    """Build the ysproto live URL. ``stream`` selects the encoder track:
+    1 = main stream, 2 = sub-stream (lower res, short GOP → a keyframe lands within
+    a single VTDU session; see the IPC/keyframe finding in doc/reference.md B.11)."""
     biz = f"&{dev['biz']}" if dev["biz"] else ""
     ts = int(time.time() * 1000)
     return (
         f"ysproto://{ip}:{port}/live?"
-        f"dev={dev['serial']}&chn={dev['channel']}&stream=1&cln={CLIENT['clientType']}"
+        f"dev={dev['serial']}&chn={dev['channel']}&stream={stream}"
+        f"&cln={CLIENT['clientType']}"
         f"&isp=0&auth=1&ssn={token}{biz}&vip=0&timestamp={ts}"
     )
+
+
+def set_stream_param(url: str, stream: int) -> str:
+    """Force the ``stream=`` index in a ysproto live URL (used to make the VTM's
+    redirect carry the requested track through to the VTDU handshake)."""
+    return re.sub(r"stream=\d+", f"stream={stream}", url, count=1)
 
 
 def streaminfo_exchange(
@@ -492,13 +503,17 @@ def streaminfo_exchange(
         log(f"  (ignoring frame ch={ch:#04x} msg={msg:#05x} len={len(rsp)})")
 
 
-def open_stream(dev: dict, token: str) -> tuple[socket.socket, FrameReader, str | None]:
-    """VTM handshake -> VTDU redirect -> VTDU handshake. Returns live VTDU socket."""
+def open_stream(
+    dev: dict, token: str, stream: int = 1
+) -> tuple[socket.socket, FrameReader, str | None]:
+    """VTM handshake -> VTDU redirect -> VTDU handshake. Returns live VTDU socket.
+
+    ``stream`` selects the encoder track (1 = main, 2 = sub-stream)."""
     # 1) VTM
-    log(f"connect VTM {dev['vtm_ip']}:{dev['vtm_port']}")
+    log(f"connect VTM {dev['vtm_ip']}:{dev['vtm_port']}  (stream={stream})")
     vtm = socket.create_connection((dev["vtm_ip"], dev["vtm_port"]), timeout=10)
     vtm.settimeout(5)
-    vtm_url = build_stream_url(dev["vtm_ip"], dev["vtm_port"], dev, token)
+    vtm_url = build_stream_url(dev["vtm_ip"], dev["vtm_port"], dev, token, stream)
     fields = streaminfo_exchange(vtm, vtm_url, None)
     vtm.close()
 
@@ -518,6 +533,10 @@ def open_stream(dev: dict, token: str) -> tuple[socket.socket, FrameReader, str 
     vtdu_host = redirect.split("//", 1)[1].split("/", 1)[0]
     vtdu_ip, _, vtdu_port = vtdu_host.partition(":")
     log(f"VTM -> VTDU redirect {vtdu_ip}:{vtdu_port}  vtmstreamkey={redact(vtm_key)}")
+
+    # Ensure the requested track survives into the VTDU handshake (the VTM echoes
+    # the URL back, but normalise stream= in case it was rewritten to the main track).
+    redirect = set_stream_param(redirect, stream)
 
     # 2) VTDU — reuse the redirect URL verbatim, now carrying the vtmstreamkey
     log(f"connect VTDU {vtdu_ip}:{vtdu_port}")

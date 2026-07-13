@@ -306,6 +306,25 @@ encrypted handshake (`0x14A`).
 > into a fresh session, produced **no** on-demand keyframe on an IPC camera (see the
 > IPC/GOP finding in B.11). The real opcode must be recovered by capturing the
 > official EZVIZ client (`scripts/parse_ysproto_pcap.py`) — still outstanding.
+>
+> **First real-client capture (2026-07-13): the IPC cams took the LAN P2P path.**
+> In `scripts/in/EzViz_Capture.pcapng` the app streamed the powered IPC cams
+> **directly over the LAN** (phone ↔ camera `192.168.68.55`, ctrl port 9010 /
+> media 9020) using EZVIZ's private P2P protocol (magic `9e ba ac e9`, XML-
+> negotiated, stream opcode `0x3105`/`0x3106`) — **not** cloud `ysproto`. Only the
+> two **BatteryCamera** cams went via the cloud VTM/VTDU (RTP/HEVC), so the parser
+> saw only them. The one unknown **cloud** opcode, **`0x130`**, is **stream-stop/
+> teardown** (start/stop range above; sent last after the keepalives; `streamssn`
+> body; already swept → no IDR), not a force-IDR — the client sent no force-IDR on
+> these cams. Handshake confirmed: StreamInfoReq to the VTM (`:8554`) then the VTDU
+> (`:600x`); keep-alive `0x132`/`streamssn`.
+>
+> The LAN IPC media (`0x3106`) does contain a real **SPS+PPS+IDR** cluster, so the
+> IPC cam **emits keyframes on a fresh stream start** — the cloud IPC problem is
+> about how the **VTDU relays** the stream (a persistent/shared device GOP joined
+> mid-stream, plus the ~27 s drop), not the cam withholding IDRs. To find any cloud
+> force-IDR opcode (if one exists), re-capture with the phone **off the LAN**
+> (cellular only) so an IPC cam is forced through the cloud path.
 
 ### B.4 The handshake
 
@@ -506,8 +525,10 @@ Two independent layers exist; both are documented here for completeness but
    `aesmd5` that likely bind/verify the AES key; devices also expose a
    "permanent key" thought to derive (not be) the stream key.
 
-**Recommendation:** require image encryption **off** for v1 and stream on `0x01`.
-Treat the encrypted path as a research item.
+**Recommendation (updated 2026-07-13):** encryption support is **proven**, not a
+research item — decrypt on `0x01` with the verification code (AES-ECB; see B.11).
+The config flow should collect the verification code for any encrypted cam and
+auto-detect whether a stream is encrypted (decrypting a clear stream corrupts it).
 
 ### B.11 Operational realities
 
@@ -526,14 +547,25 @@ Treat the encrypted path as a research item.
   guidance said keep-alive was unreliable; in fact `0x132`/`streamssn` every ~5 s
   is what keeps media flowing — without it an RTP stream stalls after the parameter
   sets. Use keep-alive **and** the reconnect loop; they solve different problems.
-- **IPC cameras have a long keyframe interval.** *(Finding 2026-07-13.)* The
-  MPEG-PS/H.264 IPC cams emit keyframes only **~once every few minutes** (a
-  17-session sweep, ~170 s of sampling, saw a single IDR), and a fresh VTDU session
-  does **not** get an on-connect IDR the way RTP cams effectively do. Because the
-  ~27 s drop caps a session well below the GOP length, a single session almost
-  never contains a full keyframe — so H.264 can't decode a frame from it. Getting
-  IPC frames reliably needs an explicit **force-IDR request** (opcode unknown —
-  see B.3) or the low-GOP **substream** (`stream=2`, §B.6).
+- **IPC cameras: the blocker was video encryption, not GOP length — now solved.**
+  *(Resolved 2026-07-13.)* Earlier we read the IPC failure as a long keyframe
+  interval on the **main** stream (a ~170 s sweep saw a single IDR). The fix has two
+  parts, both proven live:
+  1. **Substream (`stream=2`)** — delivers **SPS+PPS+IDR in every ~5 s session**
+     (verified by the probe's per-session NAL census), so one VTDU session carries a
+     full keyframe. The main stream's minutes-long GOP does not.
+  2. **Decrypt the video** — the MPEG-PS container and PPS are in the clear, but the
+     **VCL slice NALs are AES-encrypted**. This is **EZVIZ Image Encryption**. The
+     scheme (per `pyezvizapi.stream.decrypt_hikvision_ps_video`): **AES-ECB, no IV**,
+     key = the **verification code** `.encode()` zero-padded/truncated to **16 B**;
+     only the first `4096` B of each video NAL body is encrypted, starting after the
+     `nalu_header_size` codec-header bytes (**0** for these H.264 cams — the NAL
+     header itself is encrypted — vs `2` for HEVC; auto-detected by scoring trial
+     decrypts). Decrypting before FFmpeg yields clean **H.264 768×432**.
+  Net path: **substream + decrypt with the verification code**. Battery (RTP/HEVC)
+  cams need neither — their streams are in the clear. Alternatively a user can
+  **disable Image Encryption** on the device for a clear stream. Tooling:
+  `ezviz_stream_probe.py --stream 2 --verify-code <code>` (or `EZVIZ_VERIFY_CODE`).
 - **On-demand only.** Continuous streaming destroys battery runtime. Stream **only
   while a client is watching** and stop on idle (e.g. a short idle timeout after
   the last viewer disconnects) — never 24/7.

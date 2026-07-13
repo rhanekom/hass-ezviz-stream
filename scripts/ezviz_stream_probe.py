@@ -35,6 +35,13 @@ except ImportError:  # pragma: no cover
         "Run this from the repo, e.g. `uv run python scripts/ezviz_stream_probe.py`."
     )
 
+try:
+    # Decryption for cams with Image Encryption ON (reference.md B.11): AES-ECB,
+    # key = verification code zero-padded to 16 B. pyezvizapi is a dev dep.
+    from pyezvizapi.stream import decrypt_hikvision_ps_video
+except ImportError:  # pragma: no cover
+    decrypt_hikvision_ps_video = None
+
 
 def _send_keepalive(sock: socket.socket, ssn_body: bytes) -> None:
     with contextlib.suppress(OSError):
@@ -46,11 +53,12 @@ def _send_keepalive(sock: socket.socket, ssn_body: bytes) -> None:
         )
 
 
-def stream_segment(dev: dict, token: str, fh, deadline: float) -> dict:
+def stream_segment(dev: dict, token: str, fh, deadline: float, stream: int = 1) -> dict:
     """Read one VTDU session (until the ~27s drop or the deadline), appending media
     to fh and sending periodic KeepAlive. RTP is de-packetized to Annex-B HEVC;
-    PS/TS bodies are written raw for FFmpeg to demux."""
-    vtdu, reader, stream_ssn = ez.open_stream(dev, token)
+    PS/TS bodies are written raw for FFmpeg to demux. ``stream`` selects the track
+    (1 = main, 2 = sub-stream)."""
+    vtdu, reader, stream_ssn = ez.open_stream(dev, token, stream)
     ka_body = stream_ssn.encode() if stream_ssn else None
     ka_interval = 5.0
     last_ka = time.time()
@@ -103,6 +111,26 @@ def stream_segment(dev: dict, token: str, fh, deadline: float) -> dict:
 MIN_JPG_BYTES = 5000  # a real frame is ~100-400KB; smaller = a decode artifact
 
 
+def _h264_param_census(path: Path) -> tuple[int, int, int]:
+    """Count H.264 SPS/PPS/IDR NAL units in a (PS/TS) capture. Scans Annex-B start
+    codes over the raw bytes; MPEG-PS/PES prefixes (`00 00 01 BA/E0/C0…`) map to NAL
+    types 26/0/… so they don't collide with SPS(7)/PPS(8)/IDR(5). Used to see whether
+    a session carries the parameter sets a decoder needs (see reference B.11)."""
+    buf = path.read_bytes() if path.exists() else b""
+    sps = pps = idr = 0
+    i, n = 0, len(buf)
+    while i < n - 4:
+        if buf[i] == 0 and buf[i + 1] == 0 and buf[i + 2] == 1:
+            nal = buf[i + 3] & 0x1F
+            sps += nal == 7
+            pps += nal == 8
+            idr += nal == 5
+            i += 3
+        else:
+            i += 1
+    return sps, pps, idr
+
+
 def _ffmpeg_fmt(transport: str | None) -> str | None:
     """FFmpeg -f for a transport. RTP is a raw HEVC elementary stream (force it);
     mpeg-ps/ts are self-describing containers (force the demuxer so ffmpeg resyncs
@@ -110,13 +138,9 @@ def _ffmpeg_fmt(transport: str | None) -> str | None:
     return {"rtp": "hevc", "mpeg-ps": "mpeg", "mpeg-ts": "mpegts"}.get(transport or "")
 
 
-def extract_jpg(src: Path, jpg: Path, transport: str | None) -> int:
-    """Decode the first real frame of src to jpg; return the jpg size (0 = failed)."""
-    if not shutil.which("ffmpeg"):
-        ez.log("ffmpeg not found; skipping frame extraction")
-        return 0
+def _ffmpeg_to_jpg(src: Path, jpg: Path, fmt: str | None) -> int:
+    """Run ffmpeg to pull one frame; return jpg size (0 = failed / too small)."""
     cmd = ["ffmpeg", "-hide_banner", "-v", "error", "-y"]
-    fmt = _ffmpeg_fmt(transport)
     if fmt:
         cmd += ["-f", fmt]
     cmd += ["-i", str(src), "-frames:v", "1", str(jpg)]
@@ -126,6 +150,39 @@ def extract_jpg(src: Path, jpg: Path, transport: str | None) -> int:
         jpg.unlink(missing_ok=True)
         return 0
     return size
+
+
+def extract_jpg(
+    src: Path, jpg: Path, transport: str | None, verify_code: str | None = None
+) -> int:
+    """Decode the first real frame of src to jpg; return the jpg size (0 = failed).
+
+    For a PS/TS cam with Image Encryption ON, pass ``verify_code`` (the camera's
+    verification code): the video NAL bodies are AES-ECB encrypted, so we decrypt
+    the session with ``pyezvizapi`` before decoding, then fall back to a raw decode
+    (the stream may actually be in the clear)."""
+    if not shutil.which("ffmpeg"):
+        ez.log("ffmpeg not found; skipping frame extraction")
+        return 0
+    fmt = _ffmpeg_fmt(transport)
+    if (
+        verify_code
+        and transport in ("mpeg-ps", "mpeg-ts")
+        and decrypt_hikvision_ps_video is not None
+    ):
+        try:
+            dec = decrypt_hikvision_ps_video(
+                src.read_bytes(), verify_code, nalu_header_size=None
+            )
+            dpath = src.with_name(f"{src.stem}.dec.bin")
+            dpath.write_bytes(dec)
+        except Exception as exc:  # noqa: BLE001 — diagnostic: log and fall back to raw
+            ez.log(f"decrypt failed ({exc!r}); trying raw decode")
+        else:
+            size = _ffmpeg_to_jpg(dpath, jpg, fmt)
+            if size:
+                return size
+    return _ffmpeg_to_jpg(src, jpg, fmt)
 
 
 def capture_camera(
@@ -154,20 +211,27 @@ def capture_camera(
         try:
             token = ez.get_vtdu_token(auth_addr, session_id, debug=args.debug)
             with seg_path.open("wb") as fh:
-                st = stream_segment(dev, token, fh, deadline)
+                st = stream_segment(dev, token, fh, deadline, args.stream)
         except (ez.ApiError, OSError) as exc:
             ez.log(f"[{tag}] session {seg} failed: {exc}")
             time.sleep(2)
             continue
-        # Lock the transport to the first clearly-detected container (a reconnect
-        # may start mid-PES and mis-detect as "unknown").
-        if st["transport"] in ("rtp", "mpeg-ps", "mpeg-ts"):
-            transport = transport or st["transport"]
+        # Lock the transport, preferring the unambiguous container magic. MPEG-PS/TS
+        # start with a fixed pack/sync byte, so trust them outright; "rtp" is only a
+        # version-bit heuristic that a mid-PES reconnect can trip (a stray 0x83 byte),
+        # so lock it only when nothing stronger has been seen.
+        if st["transport"] in ("mpeg-ps", "mpeg-ts"):
+            transport = st["transport"]
+        elif st["transport"] == "rtp" and transport is None:
+            transport = "rtp"
         eff = transport or st["transport"]
         ez.log(
             f"[{tag}] seg{seg}: transport={st['transport']} packets={st['packets']} "
             f"nals={st['nals']} written={st['out_bytes']}B closed={st['closed']}"
         )
+        if st["transport"] in ("mpeg-ps", "mpeg-ts"):
+            s, p, d = _h264_param_census(seg_path)
+            ez.log(f"[{tag}]   this session: SPS={s} PPS={p} IDR={d}")
         if st["packets"] == 0:
             ez.log(f"[{tag}] no packets (camera waking?) — retrying")
             time.sleep(2)
@@ -178,7 +242,7 @@ def capture_camera(
             src = kept_bin
         else:
             src = seg_path
-        size = extract_jpg(src, out_dir / f"{label}.jpg", eff)
+        size = extract_jpg(src, out_dir / f"{label}.jpg", eff, args.verify_code)
         if size:
             if src is not kept_bin:
                 src.replace(kept_bin)
@@ -208,7 +272,7 @@ def _probe_one_opcode(
     then keep reading. Measure H.264 SPS/IDR markers arriving *after* the send vs
     before — a forced keyframe shows up as IDRs appearing only after the opcode.
     """
-    vtdu, reader, ssn = ez.open_stream(dev, token)
+    vtdu, reader, ssn = ez.open_stream(dev, token, args.stream)
     body = b"" if args.probe_body == "empty" else (ssn.encode() if ssn else b"")
     seg = out_dir / "probe.seg.bin"
     state = {"fu": None}
@@ -308,9 +372,11 @@ def probe_iframe(
         )
 
 
-def _sample_transport(dev: dict, token: str, timeout: float = 6.0) -> str | None:
+def _sample_transport(
+    dev: dict, token: str, timeout: float = 6.0, stream: int = 1
+) -> str | None:
     """Open a brief session just to detect the camera's transport, then close."""
-    vtdu, reader, _ssn = ez.open_stream(dev, token)
+    vtdu, reader, _ssn = ez.open_stream(dev, token, stream)
     deadline = time.time() + timeout
     try:
         while time.time() < deadline:
@@ -336,7 +402,7 @@ def _select_ps_camera(
     for dev in targets:
         try:
             token = ez.get_vtdu_token(auth_addr, session_id, debug=args.debug)
-            transport = _sample_transport(dev, token)
+            transport = _sample_transport(dev, token, stream=args.stream)
         except (ez.ApiError, OSError) as exc:
             ez.log(f"sample {ez.mask_serial(dev['serial'])} failed: {exc}")
             continue
@@ -367,6 +433,20 @@ def main() -> int:
     ap.add_argument("--region", default=os.environ.get("EZVIZ_REGION", "Europe"))
     ap.add_argument(
         "--serial", help="capture only this camera (default: all streamable)"
+    )
+    ap.add_argument(
+        "--stream",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="encoder track: 1=main (default), 2=sub-stream "
+        "(lower res, short GOP → keyframe within one VTDU session; helps IPC cams)",
+    )
+    ap.add_argument(
+        "--verify-code",
+        default=os.environ.get("EZVIZ_VERIFY_CODE"),
+        help="camera verification code (Image Encryption password); decrypts "
+        "encrypted PS/TS video before decode. Default: EZVIZ_VERIFY_CODE env.",
     )
     ap.add_argument(
         "--duration",
