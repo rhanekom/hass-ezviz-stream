@@ -11,6 +11,7 @@ FROM mcr.microsoft.com/devcontainers/python:3.14
 # Keep these in sync with the matching rev in .pre-commit-config.yaml.
 ARG GITLEAKS_VERSION=8.30.1
 ARG ACTIONLINT_VERSION=1.7.12
+ARG GO2RTC_VERSION=1.9.14
 
 # Global, machine-wide setup in a single RUN layer (docker:S7031 — consecutive
 # RUN instructions merged). This layer changes rarely, so it stays cached across
@@ -22,6 +23,7 @@ ARG ACTIONLINT_VERSION=1.7.12
 #   gh                            - GitHub CLI (from the official apt repo)
 #   gitleaks                      - secret scanning (gitleaks-system pre-commit hook)
 #   actionlint                    - GitHub Actions linting (actionlint-system hook)
+#   go2rtc                        - live-stream serving (HA go2rtc integration; §6)
 #   uv                            - Python dependency manager (pyproject.toml / uv.lock)
 #   pip                           - upgraded to latest (machine-wide)
 RUN apt-get update \
@@ -47,6 +49,9 @@ RUN apt-get update \
         | tar -xz -C /usr/local/bin gitleaks \
     && curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
         | tar -xz -C /usr/local/bin actionlint \
+    && curl -fsSL "https://github.com/AlexxIT/go2rtc/releases/download/v${GO2RTC_VERSION}/go2rtc_linux_amd64" \
+        -o /usr/local/bin/go2rtc \
+    && chmod +x /usr/local/bin/go2rtc \
     && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
     && python3 -m pip install --upgrade pip
 
