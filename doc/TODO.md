@@ -49,15 +49,19 @@ reconnect loop + KeepAlive.
 - [x] `api.py` — async cloud client on HA's `aiohttp` session: `async_login`,
       `async_get_cameras`; typed errors (`InvalidAuth`, `MfaRequired` for `6002`,
       `CannotConnect`, `InvalidRegion`). Ported auth/discovery from `ezviz_cloud.py`.
-- [x] `config_flow.py` — user step (email/pass/region, validated) → cameras step
-      (multi-select + shared verification code); MFA `6002` → clear error;
-      `unique_id` = account email.
-- [x] `strings.json` + `translations/en.json`.
-- [x] `tests/test_config_flow.py` — happy path, invalid-auth/MFA/cannot-connect,
-      no-cameras + already-configured aborts (mocked api). `tests/conftest.py`
-      enables custom integrations.
-- Note: `requirements` stays `[]` and `pycryptodome`/`ffmpeg` get added with
-      Milestone B (when the decryptor + streaming move into the integration).
+- [x] `config_flow.py` — **account entry** flow (email/pass/region, validated; MFA
+      `6002` → clear error; `unique_id` = account email) + **camera subentry** flow
+      (`CameraSubentryFlowHandler` via `async_get_supported_subentry_types`): pick a
+      not-yet-added camera + supply **its own** verification code; `unique_id` =
+      serial (no dupes). Per-camera codes — never a shared code.
+- [x] `strings.json` + `translations/en.json` (account step + `config_subentries.
+      camera` section). `hacs.json` HA floor bumped to `2025.4.0` (subentries).
+- [x] `tests/test_config_flow.py` — account flow (happy path, invalid-auth/MFA/
+      cannot-connect, already-configured) + subentry flow (add camera, no-cameras-
+      left). `tests/conftest.py` enables custom integrations.
+- Note: `requirements` stays `[]`; `pycryptodome`/`ffmpeg` get added with Milestone
+      B. **Subentry reconfigure** (edit a camera's code) is deferred to Milestone D
+      (polish); the `2025.4` floor already covers it.
 
 ### B. Camera entity + streaming
 

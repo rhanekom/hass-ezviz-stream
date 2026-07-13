@@ -9,14 +9,6 @@
           "password": "Password",
           "region": "Region"
         }
-      },
-      "cameras": {
-        "title": "Cameras",
-        "description": "Select the cameras to add. If any have Image Encryption enabled, enter the verification code (the 6-character code on the camera label); one code is used for all selected cameras.",
-        "data": {
-          "cameras": "Cameras",
-          "verification_code": "Verification code (encryption password)"
-        }
       }
     },
     "error": {
@@ -27,8 +19,31 @@
       "unknown": "An unexpected error occurred."
     },
     "abort": {
-      "already_configured": "This EZVIZ account is already configured.",
-      "no_cameras": "No streamable cameras were found on this account."
+      "already_configured": "This EZVIZ account is already configured."
+    }
+  },
+  "config_subentries": {
+    "camera": {
+      "title": "Add camera",
+      "entry_type": "Camera",
+      "initiate_flow": {
+        "user": "Add camera"
+      },
+      "step": {
+        "user": {
+          "title": "Add camera",
+          "description": "Choose a camera to stream. If it has Image Encryption enabled, enter its verification code (the 6-character code on the camera label); leave blank otherwise.",
+          "data": {
+            "serial": "Camera",
+            "verification_code": "Verification code (encryption password)"
+          }
+        }
+      },
+      "abort": {
+        "no_cameras": "All streamable cameras on this account have already been added.",
+        "cannot_connect": "Unable to connect to the EZVIZ cloud.",
+        "invalid_auth": "The account credentials are no longer valid. Reconfigure the account."
+      }
     }
   }
 }

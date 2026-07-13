@@ -156,7 +156,9 @@ Two GitHub Actions workflows on push/PR to main:
 
 ## Working Conventions
 
-- **Never auto-commit or push** — always ask first.
+- **Never auto-commit or push** — always ask first, **every time**. A prior
+  approval to commit/push does **not** carry forward to later commits; re-ask for
+  each one, even mid-session.
 - **Don't branch automatically** — the user handles branching.
 - **No self-attribution** — do not add "Authored by / Generated with Claude Code"
   or `Co-Authored-By` lines to commits, PRs, or any artifact.

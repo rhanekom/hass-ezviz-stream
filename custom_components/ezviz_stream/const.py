@@ -6,10 +6,14 @@ from typing import Final
 
 DOMAIN: Final = "ezviz_stream"
 
-# Config-entry / config-flow keys (username/password come from homeassistant.const).
+# Account config-entry keys (username/password come from homeassistant.const).
 CONF_REGION: Final = "region"
-CONF_CAMERAS: Final = "cameras"  # list[str] of selected camera serials
-CONF_VERIFICATION_CODE: Final = "verification_code"  # shared Image-Encryption code
+
+# Camera subentries: the account is the config entry; each camera is a subentry
+# carrying its own serial and (optional) Image-Encryption verification code.
+CAMERA_SUBENTRY_TYPE: Final = "camera"
+CONF_SERIAL: Final = "serial"
+CONF_VERIFICATION_CODE: Final = "verification_code"
 
 DEFAULT_REGION: Final = "Europe"
 

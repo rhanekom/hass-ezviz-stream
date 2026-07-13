@@ -393,31 +393,34 @@ APIs. Notes:
   SMS-code approach works against this same cloud API, and it would be a genuine
   differentiator over the official integration. Tracked in `TODO.md`.
 
-### 7.2 Config-flow structure — our own entities, two-step setup
+### 7.2 Config-flow structure — account entry + camera subentries
 
-**Decision (2026-07-13).** We add **our own camera entities** via **our own config
-flow**, rather than injecting an entity into each existing official-`ezviz` config
-entry. Rationale: piggybacking on the official integration's entries is brittle and
-**may become default HA behaviour in future** (if HA core adopts cloud streaming
-natively) — at which point injected entities would duplicate or conflict. Owning
-our entities keeps us self-contained and forward-compatible. (This does **not**
-change §6.3 device-registry *linking* — our own entity can still surface on the
-official device's card via matching `device_info` identifiers; we simply do not
-attach to or mutate the official config entries.)
+**Decision (2026-07-13).** The **account is the config entry** (the higher-level
+construct / hub); each **camera is a config subentry** under it. We add **our own
+entities** via our own flow rather than injecting into the official-`ezviz` config
+entries — piggybacking is brittle and **may become default HA behaviour** (if HA
+core adopts cloud streaming), which would duplicate/conflict. Owning the account
+entry keeps us self-contained and forward-compatible. (This does **not** change
+§6.3 device-registry *linking* — our per-camera entities can still surface on the
+official device's card via matching `device_info` identifiers.)
 
-Flow:
+Structure:
 
-1. **Account step (first).** The main EZVIZ account is added with **username +
-   password** (+ region). This yields the cloud session used for discovery and the
-   VTM/VTDU handshake. 2FA must be off (§7.1).
-2. **Camera step.** From the authenticated account, **select** the camera(s) to add
-   (discovery lists the account's streamable cameras), and for each encrypted camera
-   provide the **encryption key** (verification code) needed to decrypt its video
-   (§4, `reference.md` B.11). One shared code may cover multiple cameras.
+1. **Account config flow (the entry).** Add the EZVIZ account with **username +
+   password + region**; validated against the cloud. `unique_id` = account email;
+   2FA must be off (§7.1). No cameras are chosen here.
+2. **Camera subentry flow (per device).** From the account's **"Add camera"**, pick
+   a streamable camera (those not already added) and supply **its own** verification
+   code — optional; blank means the camera isn't encrypted. Each camera is a
+   separate subentry (`unique_id` = serial, so it can't be added twice) and can be
+   added/removed/reconfigured independently at any time. **Verification codes are
+   per-camera — never assume a shared code.**
 
-The encryption key is per-camera config; the flow should detect whether a stream is
-encrypted (a clear stream must **not** be run through the decryptor — that corrupts
-it) and only require/apply the key when needed.
+Requires Home Assistant **≥ 2025.4** (config subentries; `hacs.json` floor).
+Implemented via `ConfigSubentryFlow` +
+`ConfigFlow.async_get_supported_subentry_types`. A camera entity should detect
+whether its stream is encrypted and only run the decryptor when needed (decrypting
+a clear stream corrupts it) — see §4 and `reference.md` B.11.
 
 ## 8. Reference implementations
 
