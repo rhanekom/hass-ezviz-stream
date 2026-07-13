@@ -99,10 +99,24 @@ reconnect loop + KeepAlive.
       sessions for a keyframe (main stream). Continuous/efficient live view is
       go2rtc (C); stream selection (main/sub) becomes an option in D.
 
-### C. Serving
+### C. Serving (go2rtc)
 
-- [ ] go2rtc `exec:` source emitting Annex-B; HEVC→H.264 transcode default-on,
-      native HEVC as an option (§6.1).
+- [x] **C.1 - go2rtc provisioned** in the devcontainer (binary v1.9.14 + Dockerfile).
+- [~] **C.2 - producer (RTP/HEVC path), live-verified.** `stream.py stream_annexb()`
+      continuously writes Annex-B HEVC across the ~27 s drop (reconnect + KeepAlive);
+      `producer.py` (`python -m custom_components.ezviz_stream.producer --creds-file`)
+      logs in from a creds file (approach A) and streams to stdout, which go2rtc reads
+      as an H.265 bitstream directly (no ffmpeg wrapper needed). Verified live: a
+      battery cam decodes a real frame through the producer. `tests/test_producer.py`
+      covers camera selection.
+    - [ ] **C.2b - PS/encrypted (IPC) continuous path.** go2rtc doesn't read MPEG-PS;
+          needs incremental decryption + an ffmpeg remux (PS -> H.264 bitstream/TS).
+- [ ] **C.3 - wire the entity to go2rtc.** Camera declares `CameraEntityFeature.
+      STREAM`; `async_stream_source()` returns `exec:python -m ...producer
+      --creds-file <path>` (per-camera creds file written mode 600 on setup). Default
+      HEVC->H.264 via go2rtc `#video=h264`; native HEVC an option (§6.1). go2rtc then
+      serves WebRTC + snapshots (likely retiring the per-entity grab_jpeg). Provision
+      the creds-file writer + lifecycle (write on setup, remove on unload).
 
 ### D. Polish
 

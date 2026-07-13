@@ -15,6 +15,7 @@ cloud), so it is exercised against a real account - as the diagnostic scripts we
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -37,6 +38,7 @@ from .ysproto import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from typing import IO
 
     from .api import EzvizCamera
 
@@ -276,3 +278,57 @@ async def grab_jpeg(  # noqa: PLR0913 - a session needs camera, token, ffmpeg + 
             _LOGGER.debug("decoded a frame after %s session(s)", session)
             return jpeg
     return None
+
+
+async def stream_annexb(
+    camera: EzvizCamera,
+    token_factory: Callable[[], Awaitable[str]],
+    out: IO[bytes],
+    *,
+    stream: int,
+) -> None:
+    """
+    Continuously write Annex-B HEVC to ``out``, reconnecting across the drop.
+
+    For RTP/HEVC cameras (battery cams) only - go2rtc reads the H.265 bitstream from
+    the producer's stdout directly. Runs until cancelled (the process is stopped by
+    go2rtc when no client is watching). MPEG-PS (encrypted IPC) needs continuous
+    decryption + a remux and is handled separately (C.2b).
+    """
+    while True:
+        try:
+            token = await token_factory()
+            reader, writer, stream_ssn = await open_stream(camera, token, stream=stream)
+        except StreamError as err:
+            _LOGGER.debug("stream handshake failed: %s", err)
+            await asyncio.sleep(_RETRY_BACKOFF)
+            continue
+
+        loop = asyncio.get_running_loop()
+        frames = _FrameReader(reader)
+        depacketizer = HevcDepacketizer()
+        last_ka = loop.time()
+        try:
+            while True:
+                if stream_ssn and loop.time() - last_ka >= _KEEPALIVE_INTERVAL:
+                    writer.write(build_keepalive(stream_ssn))
+                    await writer.drain()
+                    last_ka = loop.time()
+                frame = await frames.next_frame(loop.time() + _READ_SLICE)
+                if frame is None:
+                    if frames.closed:
+                        break  # the ~27 s VTDU drop; reconnect below
+                    continue
+                channel, _msg, body = frame
+                if channel != CH_STREAM or not body:
+                    continue
+                if detect_transport(body) == "rtp":
+                    chunk = depacketizer.push(body)
+                    if chunk:
+                        out.write(chunk)
+                        out.flush()
+        finally:
+            writer.close()
+            with contextlib.suppress(OSError):
+                await writer.wait_closed()
+        await asyncio.sleep(_RETRY_BACKOFF)
