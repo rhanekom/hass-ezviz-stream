@@ -11,7 +11,9 @@ requires-python = ">=3.14.2"
 # Assistant installs them at launch, but our dev tooling and the pip-audit hook
 # (which audits `uv export --no-dev`, i.e. this tree only, excluding HA) need them
 # declared here too. Keep the two in step.
-dependencies = []
+dependencies = [
+    "pycryptodome>=3.20",
+]
 
 # Development / tooling dependencies (source of truth for the dev environment).
 # Manage with uv:
@@ -29,7 +31,6 @@ dev = [
     "pytest-homeassistant-custom-component>=0.13.346",
     "scapy>=2.7.0",
     "pyezvizapi>=1.0.5.0",
-    "pycryptodome>=3.23.0",
     "pyturbojpeg>=2.4.0",
 ]
 

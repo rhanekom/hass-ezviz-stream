@@ -13,21 +13,16 @@ Two guarantees, on synthetic MPEG-PS built here (no real camera data / secrets):
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 from Crypto.Cipher import AES
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-
-import ezviz_decrypt as ez
 from pyezvizapi.stream import (
     decrypt_hikvision_ps_video as oracle_decrypt,
 )
 from pyezvizapi.stream import (
     detect_hikvision_ps_video_nalu_header_size as oracle_detect,
 )
+
+from custom_components.ezviz_stream import decrypt as ez
 
 CODE = "ezviz-test-code"  # synthetic AES key material for tests, not a real secret
 

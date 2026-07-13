@@ -36,9 +36,11 @@ except ImportError:  # pragma: no cover
     )
 
 try:
-    # Our own decryption for cams with Image Encryption ON (reference.md B.11):
-    # AES-ECB, key = verification code zero-padded to 16 B. No pyezvizapi at runtime.
-    from ezviz_decrypt import decrypt_ps_video
+    # This diagnostic decrypts captured PS with pyezvizapi (a dev dependency / the
+    # oracle). The integration ships its own decryptor in
+    # `custom_components/ezviz_stream/decrypt.py`, validated byte-for-byte against
+    # this in the test suite (reference.md B.11).
+    from pyezvizapi.stream import decrypt_hikvision_ps_video as decrypt_ps_video
 except ImportError:  # pragma: no cover
     decrypt_ps_video = None
 

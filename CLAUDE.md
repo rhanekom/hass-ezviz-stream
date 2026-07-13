@@ -143,9 +143,14 @@ All lint rules enabled (`select = ["ALL"]`) with specific exclusions. Target: Py
 - **Prefer inline suppression over global suppression.** To silence a lint rule in
   integration code (`custom_components/`), use a targeted inline `# noqa: <CODE>`
   (with a reason) on the offending line — do **not** add a rule to `ignore` or
-  `per-file-ignores` in `.ruff.toml`. The **only** exceptions are the `tests/` and
+  `per-file-ignores` in `.ruff.toml`. The exceptions are the `tests/` and
   `scripts/` directories, whose `per-file-ignores` blocks in `.ruff.toml` are the
-  accepted place to relax rules wholesale (test/CLI ergonomics).
+  accepted place to relax rules wholesale (test/CLI ergonomics), **and the low-level
+  protocol/codec modules** (`custom_components/ezviz_stream/{decrypt,ysproto}.py`),
+  which have a scoped `per-file-ignores` block relaxing magic-value/complexity/
+  message-style rules — dense bit-twiddling (NAL masks, RTP fields, AES maths) where
+  naming every mask hurts readability. Keep that carve-out *narrow* (only those
+  files); all other integration code stays under full linting with inline `noqa`.
 
 ## CI/CD
 

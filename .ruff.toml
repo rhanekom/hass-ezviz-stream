@@ -47,6 +47,19 @@ ignore = [
     "TC003", # keep type-only imports inline for readability in scripts
 ]
 
+# Low-level protocol / codec modules: dense bit-twiddling (NAL-type masks, RTP
+# fields, AES block maths) where naming every mask/constant hurts readability and
+# the parse/decrypt functions are inherently branchy. Relaxed like scripts/ but
+# scoped to these specific files — the rest of the integration keeps full linting.
+# (See CLAUDE.md "Ruff Configuration" for the documented exception.)
+"custom_components/ezviz_stream/{decrypt,ysproto}.py" = [
+    "PLR2004", # magic values (bit masks, NAL types, RTP payload types)
+    "C901", "PLR0911", "PLR0912", "PLR0915", # branchy depacketize/decrypt state machines
+    "PLR0913", # protocol builders take several fields
+    "TRY003", "EM101", "EM102", # short inline messages on ValueError are readable here
+    "D205", "D209", "D213", # docstring layout is noise on these
+]
+
 [lint.flake8-pytest-style]
 fixture-parentheses = false
 

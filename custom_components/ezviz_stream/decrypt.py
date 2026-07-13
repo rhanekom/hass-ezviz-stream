@@ -338,7 +338,7 @@ def detect_nalu_header_size(
 # --------------------------------------------------------------------------- #
 # Decryption
 # --------------------------------------------------------------------------- #
-def decrypt_ps_video(  # noqa: C901, PLR0915 — faithful port of intricate PS/NAL logic
+def decrypt_ps_video(
     data: bytes, key: str | bytes, *, nalu_header_size: int | None = None
 ) -> bytes:
     """Decrypt EZVIZ Image-Encryption MPEG-PS video and return the clear stream.
@@ -374,7 +374,7 @@ def decrypt_ps_video(  # noqa: C901, PLR0915 — faithful port of intricate PS/N
                 out.append((pos, length))
         return out
 
-    def decrypt_video_payload_run(payload: bytes) -> bytes:  # noqa: PLR0915
+    def decrypt_video_payload_run(payload: bytes) -> bytes:
         payload_output = bytearray(payload)
         pending_positions: list[int] = []
         pending_block = bytearray()

@@ -73,13 +73,20 @@ reconnect loop + KeepAlive.
       are placeholders (`async_camera_image` → None) until B.2/B.3. `PyTurboJPEG`
       added as a **dev** dep (needed to import HA's `camera` component in tests).
       Tested (`tests/test_camera.py`): entity + linked device created per subentry.
-- [ ] **B.2 — async streaming core.** Port handshake + RTP depacketizer + PS decrypt
-      from `scripts/` into `custom_components/` (async sockets / executor), reconnect
-      loop + KeepAlive, on-demand. Move `ezviz_decrypt.py` in (`pycryptodome` →
-      `manifest.json` + `[project].dependencies`).
-- [ ] **B.3 — wire the producer to the entity** (snapshot via `async_camera_image`;
-      live stream lands with go2rtc, Milestone C). Substream/codec from options.
-- [ ] Tests (mock HA + sockets).
+- [x] **B.2 — pure media core + decryptor moved in.** `decrypt.py` moved into the
+      integration (git mv); `ysproto.py` added — RTP/RFC-7798 `HevcDepacketizer`,
+      `detect_transport`, frame framing (`build_frame`/`read_frame`), minimal
+      protobuf, StreamInfoReq/KeepAlive builders, stream-URL helpers — all pure/
+      I/O-free and unit-tested (`tests/test_ysproto.py`). `pycryptodome` moved from
+      dev → runtime (`manifest.json` + `[project].dependencies`); the diagnostic
+      probe now decrypts via the `pyezvizapi` oracle (dev-only). Codec/protocol
+      modules got a scoped `per-file-ignores` carve-out (CLAUDE.md documented).
+- [ ] **B.3 — socket driver + wire to the entity.** Async (or executor/subprocess)
+      handshake driver using `ysproto` + `api`: VTM→VTDU handshake, media loop,
+      reconnect across the ~27 s drop + KeepAlive, on-demand. Feeds
+      `async_camera_image` (snapshot) now; live stream via go2rtc (Milestone C).
+      Decide in-process-async vs go2rtc-exec subprocess here. Substream/codec from
+      options.
 
 ### C. Serving
 
