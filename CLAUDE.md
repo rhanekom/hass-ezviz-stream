@@ -182,3 +182,5 @@ Two GitHub Actions workflows on push/PR to main:
   than assuming APIs/libraries behave as described.
 - **If something can be caught by a pre-commit hook, add it** — prefer enforcing a
   rule mechanically over relying on memory.
+- **No em-dashes.** Do not use em-dashes (`—`) in prose, docs, comments, or any
+  authored text. Use a plain hyphen (`-`) instead, or restructure the sentence.
