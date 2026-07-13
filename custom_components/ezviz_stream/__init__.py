@@ -16,8 +16,7 @@ from .const import CONF_REGION
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
-# No entity platforms yet — the camera platform lands with the streaming module.
-PLATFORMS: list[Platform] = []
+PLATFORMS: list[Platform] = [Platform.CAMERA]
 
 
 @dataclass

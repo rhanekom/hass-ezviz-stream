@@ -1,0 +1,69 @@
+"""Tests for the EZVIZ Stream camera platform."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
+
+from homeassistant.config_entries import ConfigSubentryData
+from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.ezviz_stream.const import (
+    CAMERA_SUBENTRY_TYPE,
+    CONF_REGION,
+    CONF_SERIAL,
+    CONF_VERIFICATION_CODE,
+    DOMAIN,
+    OFFICIAL_EZVIZ_DOMAIN,
+)
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+
+_ACCOUNT = {
+    CONF_USERNAME: "user@example.com",
+    CONF_PASSWORD: "hunter2",
+    CONF_REGION: "Europe",
+}
+
+
+def _entry_with_camera() -> MockConfigEntry:
+    return MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="user@example.com",
+        data=_ACCOUNT,
+        subentries_data=[
+            ConfigSubentryData(
+                data={CONF_SERIAL: "SN1", CONF_VERIFICATION_CODE: "ABCDEF"},
+                subentry_type=CAMERA_SUBENTRY_TYPE,
+                title="Front door",
+                unique_id="SN1",
+            )
+        ],
+    )
+
+
+async def test_camera_entity_created_per_subentry(hass: HomeAssistant) -> None:
+    """Account setup creates a camera entity per subentry on the EZVIZ device."""
+    entry = _entry_with_camera()
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.ezviz_stream.EzvizCloudApi",
+        return_value=AsyncMock(async_login=AsyncMock(return_value=None)),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    entity_id = er.async_get(hass).async_get_entity_id("camera", DOMAIN, "SN1")
+    assert entity_id is not None
+    assert hass.states.get(entity_id) is not None
+
+    device = dr.async_get(hass).async_get_device(
+        identifiers={(OFFICIAL_EZVIZ_DOMAIN, "SN1")}
+    )
+    assert device is not None
+    assert device.serial_number == "SN1"

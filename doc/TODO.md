@@ -65,12 +65,20 @@ reconnect loop + KeepAlive.
 
 ### B. Camera entity + streaming
 
-- [ ] Async streaming module: port the handshake + RTP depacketizer + PS decrypt
-      from `scripts/` into `custom_components/` (async sockets / executor), with the
-      reconnect loop + KeepAlive and on-demand start/stop. Move `ezviz_decrypt.py`
-      in (add `pycryptodome` to `manifest.json` + `[project].dependencies`).
-- [ ] `camera.py` — Camera entity; device-registry link to the official device
-      (§6.3); substream/codec from options; on-demand.
+- [x] **B.1 — camera platform + entities (structural).** `camera.py`:
+      `async_setup_entry` creates one `EzvizStreamCamera` per camera subentry
+      (`async_add_entities(..., config_subentry_id=...)`); entity `unique_id` =
+      serial, device-registry linked to the official EZVIZ device via a shared
+      `("ezviz", serial)` identifier (§6.3). `PLATFORMS = [CAMERA]`. Streaming methods
+      are placeholders (`async_camera_image` → None) until B.2/B.3. `PyTurboJPEG`
+      added as a **dev** dep (needed to import HA's `camera` component in tests).
+      Tested (`tests/test_camera.py`): entity + linked device created per subentry.
+- [ ] **B.2 — async streaming core.** Port handshake + RTP depacketizer + PS decrypt
+      from `scripts/` into `custom_components/` (async sockets / executor), reconnect
+      loop + KeepAlive, on-demand. Move `ezviz_decrypt.py` in (`pycryptodome` →
+      `manifest.json` + `[project].dependencies`).
+- [ ] **B.3 — wire the producer to the entity** (snapshot via `async_camera_image`;
+      live stream lands with go2rtc, Milestone C). Substream/codec from options.
 - [ ] Tests (mock HA + sockets).
 
 ### C. Serving

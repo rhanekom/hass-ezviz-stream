@@ -17,6 +17,12 @@ CONF_VERIFICATION_CODE: Final = "verification_code"
 
 DEFAULT_REGION: Final = "Europe"
 
+# Domain of the official Home Assistant `ezviz` integration. We reuse its device
+# identifier so our camera lands on the same device card when it is installed, and
+# stand alone (our own device) when it isn't (spec §6.3).
+OFFICIAL_EZVIZ_DOMAIN: Final = "ezviz"
+MANUFACTURER: Final = "EZVIZ"
+
 # EZVIZ account region -> API host code (`api<code>.ezvizlife.com`). South Africa
 # routes through the Europe node (see doc/reference.md A.1).
 REGION_API_CODES: Final[dict[str, str]] = {
