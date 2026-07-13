@@ -36,11 +36,11 @@ except ImportError:  # pragma: no cover
     )
 
 try:
-    # Decryption for cams with Image Encryption ON (reference.md B.11): AES-ECB,
-    # key = verification code zero-padded to 16 B. pyezvizapi is a dev dep.
-    from pyezvizapi.stream import decrypt_hikvision_ps_video
+    # Our own decryption for cams with Image Encryption ON (reference.md B.11):
+    # AES-ECB, key = verification code zero-padded to 16 B. No pyezvizapi at runtime.
+    from ezviz_decrypt import decrypt_ps_video
 except ImportError:  # pragma: no cover
-    decrypt_hikvision_ps_video = None
+    decrypt_ps_video = None
 
 
 def _send_keepalive(sock: socket.socket, ssn_body: bytes) -> None:
@@ -168,12 +168,10 @@ def extract_jpg(
     if (
         verify_code
         and transport in ("mpeg-ps", "mpeg-ts")
-        and decrypt_hikvision_ps_video is not None
+        and decrypt_ps_video is not None
     ):
         try:
-            dec = decrypt_hikvision_ps_video(
-                src.read_bytes(), verify_code, nalu_header_size=None
-            )
+            dec = decrypt_ps_video(src.read_bytes(), verify_code, nalu_header_size=None)
             dpath = src.with_name(f"{src.stem}.dec.bin")
             dpath.write_bytes(dec)
         except Exception as exc:  # noqa: BLE001 — diagnostic: log and fall back to raw

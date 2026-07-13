@@ -23,7 +23,10 @@ ignore = [
     "PLR2004", # Magic value used in comparison, ...
     "S311", # Standard pseudo-random generators are not suitable for cryptographic purposes
     "D104", # Don't care all that much about docs in tests
-    "D100" # Don't care all that much about docs in tests
+    "D100", # Don't care all that much about docs in tests
+    "D103", # test function names are self-documenting
+    "D213", "D401", # docstring style is noise on test helpers
+    "SLF001" # tests may touch module internals (e.g. fixture builders)
 ]
 
 # Diagnostic / manual-test scripts under scripts/ are kept CLI tools, not shipped

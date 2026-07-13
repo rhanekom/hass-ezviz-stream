@@ -3,6 +3,8 @@ name = "hass-ezviz-stream"
 version = "0.0.0"
 description = "Home Assistant integration streaming EZVIZ battery cameras via the EZVIZ cloud"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.14.2"
 # Runtime dependencies of the integration. Mirror the `requirements` list from
 # custom_components/ezviz_stream/manifest.json here (e.g. pyEzvizApi): Home
@@ -27,9 +29,17 @@ dev = [
     "pytest-homeassistant-custom-component>=0.13.346",
     "scapy>=2.7.0",
     "pyezvizapi>=1.0.5.0",
+    "pycryptodome>=3.23.0",
 ]
 
 # This repo is a Home Assistant custom component, not an installable package, so
 # tell uv not to build/install the project itself — only manage its dependencies.
 [tool.uv]
 package = false
+
+[tool.pytest.ini_options]
+# pytest-homeassistant-custom-component (and the aiohttp/asyncio plugins it pulls
+# in) register async autouse fixtures; "auto" mode lets pytest-asyncio drive them
+# so plain sync unit tests (e.g. the decryptor tests) run cleanly alongside future
+# HA integration tests.
+asyncio_mode = "auto"

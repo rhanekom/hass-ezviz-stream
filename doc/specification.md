@@ -393,11 +393,45 @@ APIs. Notes:
   SMS-code approach works against this same cloud API, and it would be a genuine
   differentiator over the official integration. Tracked in `TODO.md`.
 
+### 7.2 Config-flow structure — our own entities, two-step setup
+
+**Decision (2026-07-13).** We add **our own camera entities** via **our own config
+flow**, rather than injecting an entity into each existing official-`ezviz` config
+entry. Rationale: piggybacking on the official integration's entries is brittle and
+**may become default HA behaviour in future** (if HA core adopts cloud streaming
+natively) — at which point injected entities would duplicate or conflict. Owning
+our entities keeps us self-contained and forward-compatible. (This does **not**
+change §6.3 device-registry *linking* — our own entity can still surface on the
+official device's card via matching `device_info` identifiers; we simply do not
+attach to or mutate the official config entries.)
+
+Flow:
+
+1. **Account step (first).** The main EZVIZ account is added with **username +
+   password** (+ region). This yields the cloud session used for discovery and the
+   VTM/VTDU handshake. 2FA must be off (§7.1).
+2. **Camera step.** From the authenticated account, **select** the camera(s) to add
+   (discovery lists the account's streamable cameras), and for each encrypted camera
+   provide the **encryption key** (verification code) needed to decrypt its video
+   (§4, `reference.md` B.11). One shared code may cover multiple cameras.
+
+The encryption key is per-camera config; the flow should detect whether a stream is
+encrypted (a clear stream must **not** be run through the decryptor — that corrupts
+it) and only require/apply the key when needed.
+
 ## 8. Reference implementations
 
-- `RenierM26/pyEzvizApi` — cloud auth/API (best auth base).
-- `RenierM26/ha-ezviz` — the HACS EZVIZ integration (local-RTSP only; see issue
-  **#138** "Camera from cloud (not local rtsp)" for maintainer context).
+- `RenierM26/pyEzvizApi` — cloud auth/API + (in ≥1.0.4.8) a cloud-stream/decryption
+  stack. We take **no runtime dependency** on it: HA core pins `pyezvizapi==1.0.0.7`
+  (a hard `==`, pre-cloud) and HA loads one shared env, so any version we required
+  would clash with the official `ezviz` integration. We keep it as a **dev-only**
+  dependency — a decryption *oracle* our own decryptor is differential-tested against
+  (`scripts/ezviz_decrypt.py`, `tests/test_ezviz_decrypt.py`). *(Reviewed 2026-07-13.)*
+- **Neither the HA-core `ezviz` nor `RenierM26/ha-ezviz` (HACS) streams from the
+  cloud** — both are **local-RTSP only** (the verification code is used as the RTSP
+  password, not for video decryption). The cloud-stream/decryption code exists only
+  in `pyezvizapi`'s CLI, unreleased in any integration. This is our niche; it may
+  become native someday (see the config-flow decision in §7.2).
 - `ESJavadex/ezviz-ha-addon` — reverse-engineered **cloud** connection + VTM/VTDU
   handshake (`ezviz-camera/ezviz_stream.py`); tested on HP2 battery cam. Streams
   raw channel-0x01 bodies to a pipe (does **not** RTP-depacketize — §4.1 is the
@@ -408,8 +442,9 @@ APIs. Notes:
 
 ## 9. Milestones for the new project
 
-1. **Auth + handshake** → obtain a VTDU socket streaming channel-0x01 packets
-   (reuse `pyEzvizApi` / `ezviz_stream.py`). Add **wake-retry**.
+1. **Auth + handshake** → obtain a VTDU socket streaming channel-0x01 packets.
+   Hand-rolled (proven in `scripts/ezviz_cloud.py`) — **no runtime `pyEzvizApi`**
+   (see §8). Add **wake-retry**.
 2. **De-packetize** (§4.1) → write `.h265`; verify with FFmpeg. *(This is the
    proven core — port it verbatim.)*
 3. **Producer**: continuous Annex-B HEVC to stdout + **reconnect loop** for the

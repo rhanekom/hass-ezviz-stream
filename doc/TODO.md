@@ -40,6 +40,41 @@ skeleton. The proven protocol logic here is what gets ported into the integratio
 - [x] **Decision: target both battery and normal cameras**, so the decode path
       auto-detects transport (RTP / MPEG-PS / TS) rather than assuming RTP.
       Documented in `specification.md` §4. *(decided 2026-07-12)*
+- [x] **Decision: own entities via our own two-step config flow** — not injecting
+      an entity into each existing official-`ezviz` config entry (that's brittle and
+      may become default HA behaviour). Flow: (1) add the main account (username +
+      password + region); (2) select camera(s) and supply the encryption key
+      (verification code) for encrypted cams. Device-registry linking (§6.3) still
+      applies. Documented in `specification.md` §7.2. *(decided 2026-07-13)*
+- [x] **Decision: do NOT take a runtime dependency on `pyezvizapi` — roll our own
+      decryption.** HA core pins `pyezvizapi==1.0.0.7` (hard `==`; that tag has no
+      `stream.py`/`cloud_stream.py`), and the maintainer's HACS integration pins
+      `1.0.4.7` — **both pre-cloud, both local-RTSP only** (neither streams from the
+      EZVIZ cloud). The cloud streaming + `decrypt_hikvision_ps_video` live in
+      `>=1.0.4.8` (1.0.5.0 current) but are wired only into pyezvizapi's **CLI**, not
+      any HA integration. HA loads one shared env and we expect users to also run the
+      official `ezviz` integration, so any `pyezvizapi` runtime dep would clash with
+      core's `==` pin. → **Implement our own AES-ECB video decryption** (scheme is
+      understood + proven: key padded to 16 B, 4096-B per-NAL prefix, `nalu_header_size`
+      auto-detect), **referencing `pyezvizapi`'s `decrypt_hikvision_ps_video` for edge
+      cases** (PES fragmentation, cross-packet AES-block accumulation, tail
+      look-alikes, HEVC vs H.264 header size). **Validate against the library as a
+      dev-only oracle** (it's already a dev dep — differential-test our output vs
+      theirs on captured samples). Keep our hand-rolled auth + handshake. Only new
+      runtime dep: `pycryptodome` (widely present, loosely pinned → low conflict
+      risk). *(decided 2026-07-13; see review below)*
+    - [x] **DONE:** `scripts/ezviz_decrypt.py` implements `decrypt_ps_video` +
+          `detect_nalu_header_size` (pycryptodome only). Validated **byte-for-byte
+          against the pyezvizapi oracle** on a real captured IPC sample and via
+          `tests/test_ezviz_decrypt.py` (round-trip + oracle-equivalence for
+          `nalu_header_size` 0/1/2 on synthetic MPEG-PS). The probe now decrypts via
+          our module (no runtime pyezvizapi); live end-to-end decode confirmed.
+          Ports to `custom_components/ezviz_stream/` at milestone 6.
+- [x] **Decision: license this project Apache-2.0** (was MIT) to match `pyezvizapi`
+      (Apache-2.0), from which our decryption algorithm derives — avoids license-
+      compatibility questions. `LICENSE` = Apache-2.0 text; `NOTICE` carries the
+      attribution; `pyproject.toml` `license`/`license-files` set; SPDX + attribution
+      kept in `scripts/ezviz_decrypt.py`. *(decided 2026-07-13)*
 - [x] **Prove the end-to-end cloud stream against real cameras** (§9 milestones
       1–3) — **done for BOTH transports** (RTP/HEVC battery cams and MPEG-PS/H.264
       IPC cams, the latter with substream + decryption; see the RESOLVED item below).
