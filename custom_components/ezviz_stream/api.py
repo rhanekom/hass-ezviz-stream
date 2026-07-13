@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -83,6 +84,9 @@ class EzvizCamera:
     channel: int
     status: int | None
     streamable: bool
+    vtm_ip: str | None = None
+    vtm_port: int | None = None
+    biz: str = ""  # streamBizUrl query fragment appended to the stream URL
 
     @property
     def is_online(self) -> bool:
@@ -132,6 +136,7 @@ class EzvizCloudApi:
         self._session = session
         self._session_id: str | None = None
         self._host: str | None = None
+        self._auth_addr: str | None = None
 
     async def async_login(self, email: str, password: str, region: str) -> None:
         """
@@ -203,9 +208,52 @@ class EzvizCloudApi:
                     channel=int(info.get("channelNumber") or 1),
                     status=info.get("status"),
                     streamable=bool(vtm.get("externalIp")),
+                    vtm_ip=vtm.get("externalIp"),
+                    vtm_port=int(vtm["port"]) if vtm.get("port") else None,
+                    biz=resource.get("streamBizUrl", ""),
                 )
             )
         return [cam for cam in cameras if cam.streamable]
+
+    async def async_get_vtdu_token(self) -> str:
+        """Fetch a VTDU media token (needed per streaming session). Requires login."""
+        if not self._session_id or not self._host:
+            msg = "not logged in"
+            raise EzvizStreamApiError(msg)
+        auth_addr = await self._async_auth_addr()
+        # sign = the `s` claim from the sessionId JWT payload (reference A.6).
+        payload_seg = self._session_id.split(".")[1]
+        payload_seg += "=" * (-len(payload_seg) % 4)  # base64url padding
+        try:
+            sign = json.loads(base64.urlsafe_b64decode(payload_seg))["s"]
+        except (ValueError, KeyError) as err:
+            msg = "session id is not a decodable JWT"
+            raise CannotConnect(msg) from err
+        url = f"{auth_addr}/vtdutoken2?ssid={self._session_id}&sign={sign}"
+        body = await self._get(url)
+        tokens = body.get("tokens") or []
+        if not tokens:
+            msg = f"no VTDU tokens returned (retcode={body.get('retcode')})"
+            raise CannotConnect(msg)
+        return tokens[0]
+
+    async def _async_auth_addr(self) -> str:
+        """Resolve (and cache) the auth-node host for token requests."""
+        if self._auth_addr is not None:
+            return self._auth_addr
+        try:
+            body = await self._post(
+                f"{self._host}/api/server/info/get",
+                {
+                    "sessionId": self._session_id or "",
+                    "clientType": _CLIENT["clientType"],
+                },
+            )
+            auth = _normalise_host(_deep_find(body, "authAddr"))
+        except CannotConnect:
+            auth = None
+        self._auth_addr = auth or self._host
+        return self._auth_addr
 
     async def _post(self, url: str, data: dict[str, str]) -> dict[str, Any]:
         return await self._request("post", url, data=data)

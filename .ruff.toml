@@ -26,6 +26,7 @@ ignore = [
     "D100", # Don't care all that much about docs in tests
     "D103", # test function names are self-documenting
     "D213", "D401", # docstring style is noise on test helpers
+    "EM101", "EM102", "TRY003", # inline messages fine in test asserts/helpers
     "SLF001" # tests may touch module internals (e.g. fixture builders)
 ]
 

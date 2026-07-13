@@ -81,12 +81,17 @@ reconnect loop + KeepAlive.
       dev → runtime (`manifest.json` + `[project].dependencies`); the diagnostic
       probe now decrypts via the `pyezvizapi` oracle (dev-only). Codec/protocol
       modules got a scoped `per-file-ignores` carve-out (CLAUDE.md documented).
-- [ ] **B.3 — socket driver + wire to the entity.** Async (or executor/subprocess)
-      handshake driver using `ysproto` + `api`: VTM→VTDU handshake, media loop,
-      reconnect across the ~27 s drop + KeepAlive, on-demand. Feeds
-      `async_camera_image` (snapshot) now; live stream via go2rtc (Milestone C).
-      Decide in-process-async vs go2rtc-exec subprocess here. Substream/codec from
-      options.
+- [x] **B.3a — producer control-plane (api.py).** `EzvizCamera` now carries VTM
+      routing (`vtm_ip`, `vtm_port`, `biz`); added `async_get_vtdu_token()` (auth-addr
+      resolve + JWT-sign + `vtdutoken2`). Tested (`tests/test_api.py`: login success/
+      errors/region-redirect, camera VTM fields, VTDU token).
+- [ ] **B.3b — socket driver + producer + snapshot.** **Decided: subprocess
+      producer** (go2rtc-exec path, §6). Build the async VTM→VTDU handshake driver
+      (using `ysproto` + `api`) + media loop (depacketize/decrypt) + reconnect across
+      the ~27 s drop + KeepAlive, packaged as a runnable producer writing Annex-B/
+      H.264 to stdout (creds via **env**, never argv). Wire `async_camera_image` to
+      run it → FFmpeg → JPEG (working snapshot). Substream/codec from options.
+      *(Socket path needs live-cloud verification, like the `scripts/` were.)*
 
 ### C. Serving
 
