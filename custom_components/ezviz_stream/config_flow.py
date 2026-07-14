@@ -520,15 +520,18 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
                 self._pending_data, self._pending_subentry = data, None
                 return await self.async_step_verify_failed()
 
-        # Battery cams default to the motion thumbnail (never woken for a tile), a
-        # long refresh interval, and the lower-bandwidth sub stream; all overridable.
+        # Battery cams default to a static baseline that only shows newer motion
+        # (a clean tile, no repeated wakes), a long refresh interval, and the
+        # lower-bandwidth sub stream; all overridable.
         battery = camera.is_battery
         return self.async_show_form(
             step_id="options",
             data_schema=_camera_options_schema(
                 verification_code="",
                 is_encrypted=camera.is_encrypted,
-                thumbnail_mode=THUMBNAIL_MOTION if battery else THUMBNAIL_INTERVAL,
+                thumbnail_mode=(
+                    THUMBNAIL_STATIC_MOTION if battery else THUMBNAIL_INTERVAL
+                ),
                 snapshot_interval=(
                     DEFAULT_SNAPSHOT_INTERVAL_BATTERY
                     if battery

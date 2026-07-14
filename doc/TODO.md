@@ -20,9 +20,9 @@ git history; this list is the feature-level summary.
   region, validated) then per-camera add, each with its own Image-Encryption
   verification code. Per-camera **reconfigure**, account **reauth**, and a **frame-grab
   validation** on save (retry / save-anyway soft block). Simple form with an
-  **Advanced** section (last-motion thumbnail, snapshot refresh interval, main/sub
-  stream; battery cams default to the **motion thumbnail** + **sub stream** + a long
-  interval) and a **battery-drain warning**. Account **options flow** tunes max
+  **Advanced** section (thumbnail source, snapshot refresh interval, main/sub
+  stream; battery cams default to **static-then-newer-motion** + **sub stream** + a
+  long interval) and a **battery-drain warning**. Account **options flow** tunes max
   concurrent snapshot fetches. Camera entities link to the official `ezviz` device.
 - **Cloud protocol core (no runtime `pyezvizapi`).** Hand-rolled region login,
   device discovery, VTDU token, and the VTM/VTDU `ysproto` handshake; RTP/RFC-7798

@@ -230,10 +230,10 @@ async def test_add_camera_subentry(hass: HomeAssistant) -> None:
     }
 
 
-async def test_add_battery_camera_defaults_to_motion_thumbnail(
+async def test_add_battery_camera_defaults_to_static_motion(
     hass: HomeAssistant,
 ) -> None:
-    """A battery camera defaults to the motion thumbnail + long refresh interval."""
+    """A battery camera defaults to static-then-motion + long refresh interval."""
     entry = _account_entry()
     entry.add_to_hass(hass)
 
@@ -253,7 +253,8 @@ async def test_add_battery_camera_defaults_to_motion_thumbnail(
         await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"][CONF_THUMBNAIL_MODE] == THUMBNAIL_MOTION
+    assert result["data"][CONF_THUMBNAIL_MODE] == THUMBNAIL_STATIC_MOTION
+    assert result["data"][CONF_STATIC_ANCHOR] > 0  # anchored to "now" on save
     assert result["data"][CONF_SNAPSHOT_INTERVAL] == DEFAULT_SNAPSHOT_INTERVAL_BATTERY
     assert result["data"][CONF_STREAM] == 2  # battery cams default to the sub stream
     assert result["data"][CONF_IS_BATTERY] is True  # recorded at add time

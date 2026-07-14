@@ -13,6 +13,8 @@ Two guarantees, on synthetic MPEG-PS built here (no real camera data / secrets):
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 from Crypto.Cipher import AES
 from pyezvizapi.stream import (
@@ -176,3 +178,99 @@ def test_streaming_autodetects_header_size_on_flush() -> None:
     dec = ez.StreamingPsDecryptor(CODE)  # header size auto-detected
     out = dec.feed(enc) + dec.flush()
     assert out == ez.decrypt_ps_video(enc, CODE) == clear
+
+
+# --- richer fixtures: >4096-byte prefix, multi-NAL runs, unbounded PES ------- #
+def _split_video_pes(payload: bytes, chunk: int = 1500) -> bytes:
+    """Carry ``payload`` across a run of bounded video PES packets."""
+    return b"".join(
+        _video_pes(payload[i : i + chunk]) for i in range(0, len(payload), chunk)
+    )
+
+
+def _large_nal_fixture(nalu_header_size: int) -> tuple[bytes, bytes]:
+    """A NAL whose body exceeds NAL_ENCRYPTED_PREFIX_LEN, then a second NAL.
+
+    Exercises the 4096-byte prefix cap (only the prefix is encrypted, the tail is
+    left clear) and the post-prefix start-code handling for a following NAL.
+    """
+    big = _nal(_CASES[nalu_header_size], body_len=ez.NAL_ENCRYPTED_PREFIX_LEN + 512)
+    small = _nal(_CASES[nalu_header_size], body_len=200)
+    clear = _pack_header() + _split_video_pes(big + small)
+    return clear, _encrypt_ps(clear, CODE, nalu_header_size)
+
+
+def _zero_length_video_pes(payload: bytes) -> bytes:
+    """An unbounded (length=0) video PES packet, ended by the next start code."""
+    body = b"\x80\x00\x00" + payload  # flags=0x80, no PTS, header_len=0
+    return b"\x00\x00\x01\xe0" + (0).to_bytes(2, "big") + body
+
+
+def _unbounded_fixture(nalu_header_size: int) -> tuple[bytes, bytes]:
+    """An unbounded video PES terminated by a following pack header."""
+    nal = _nal(_CASES[nalu_header_size], body_len=120)
+    clear = _pack_header() + _zero_length_video_pes(nal) + _pack_header()
+    return clear, _encrypt_ps(clear, CODE, nalu_header_size)
+
+
+@pytest.mark.parametrize("nhs", [0, 1, 2])
+def test_large_nal_prefix_cap_matches_oracle(nhs: int) -> None:
+    """A >4096-byte NAL exercises the prefix cap; decrypt matches the oracle exactly.
+
+    Round-trip is not asserted here: a large pseudo-random body can encrypt to
+    ciphertext that contains a false start code, making the transform legitimately
+    non-invertible - so the guarantee that matters is byte-for-byte agreement with the
+    upstream oracle, which both implementations honour.
+    """
+    _clear, enc = _large_nal_fixture(nhs)
+    ours = ez.decrypt_ps_video(enc, CODE, nalu_header_size=nhs)
+    assert ours == oracle_decrypt(enc, CODE, nalu_header_size=nhs)
+
+
+@pytest.mark.parametrize("nhs", [0, 1, 2])
+def test_unbounded_video_pes_round_trip_and_oracle(nhs: int) -> None:
+    """A zero-length (unbounded) video PES decrypts correctly and matches the oracle."""
+    clear, enc = _unbounded_fixture(nhs)
+    ours = ez.decrypt_ps_video(enc, CODE, nalu_header_size=nhs)
+    assert ours == clear
+    assert ours == oracle_decrypt(enc, CODE, nalu_header_size=nhs)
+
+
+@pytest.mark.parametrize("nhs", [0, 1, 2])
+def test_large_nal_streaming_matches_one_shot(nhs: int) -> None:
+    """Streaming a >4096-byte NAL in tiny chunks equals the one-shot decrypt."""
+    _clear, enc = _large_nal_fixture(nhs)
+    expected = ez.decrypt_ps_video(enc, CODE, nalu_header_size=nhs)
+    dec = ez.StreamingPsDecryptor(CODE, nalu_header_size=nhs)
+    out = bytearray()
+    for i in range(0, len(enc), 13):
+        out += dec.feed(enc[i : i + 13])
+    out += dec.flush()
+    assert bytes(out) == expected
+
+
+# --- guard rails ------------------------------------------------------------ #
+def test_negative_nalu_header_size_raises() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        ez.decrypt_ps_video(_pack_header(), CODE, nalu_header_size=-1)
+
+
+def test_detect_returns_default_without_video_evidence() -> None:
+    """No video NAL evidence falls back to the requested default (2, or None)."""
+    junk = b"no video pes packets in here " * 8
+    assert ez.detect_nalu_header_size(junk, CODE) == 2
+    assert ez.detect_nalu_header_size(junk, CODE, default=None) is None
+
+
+def test_streaming_defers_until_enough_to_detect() -> None:
+    """Auto-detect emits nothing until enough bytes accumulate to pick a header size."""
+    dec = ez.StreamingPsDecryptor(CODE)  # no explicit header size
+    assert dec.feed(_pack_header()) == b""  # far below the detection threshold
+
+
+def test_streaming_safety_valve_on_open_run() -> None:
+    """An open run that never boundaries past the cap emits nothing, without hanging."""
+    with patch.object(ez, "_MAX_STREAM_BUFFER", 16):
+        dec = ez.StreamingPsDecryptor(CODE, nalu_header_size=2)
+        chunk = b"\x00\x00\x01\xe0\x00\x00\x80\x00\x00" + bytes(64)
+        assert dec.feed(chunk) == b""  # nothing complete to emit despite the big buffer

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from homeassistant.config_entries import ConfigSubentry, ConfigSubentryData
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
@@ -15,7 +16,11 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.ezviz_stream import async_remove_config_entry_device
 from custom_components.ezviz_stream.api import EzvizCamera, MotionImage
-from custom_components.ezviz_stream.camera import EzvizStreamCamera
+from custom_components.ezviz_stream.camera import (
+    EzvizStreamCamera,
+    _write_snapshot,
+    async_setup_entry,
+)
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_IS_BATTERY,
@@ -24,6 +29,7 @@ from custom_components.ezviz_stream.const import (
     CONF_SLOW_THUMBNAILS,
     CONF_SNAPSHOT_INTERVAL,
     CONF_STATIC_ANCHOR,
+    CONF_STREAM,
     CONF_THUMBNAIL_MODE,
     CONF_VERIFICATION_CODE,
     DOMAIN,
@@ -575,3 +581,208 @@ async def test_stream_source_and_registry_lifecycle(hass: HomeAssistant) -> None
 
     await camera.async_will_remove_from_hass()
     assert "SN1" not in registry
+
+
+# --- setup, source, background + edge paths --------------------------------- #
+def _make_camera(
+    hass: HomeAssistant, data: dict[str, object], *, api: AsyncMock | None = None
+) -> EzvizStreamCamera:
+    """Build a standalone camera entity bound to a fake account entry."""
+    entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(
+            api=api or AsyncMock(), snapshot_semaphore=asyncio.Semaphore(1)
+        )
+    )
+    camera = EzvizStreamCamera(
+        entry, SimpleNamespace(data=data, title="Cam", subentry_id="x")
+    )
+    camera.hass = hass
+    return camera
+
+
+async def test_setup_skips_non_camera_subentries(hass: HomeAssistant) -> None:
+    """Subentries that are not cameras are ignored during platform setup."""
+    entry = SimpleNamespace(
+        subentries={"a": SimpleNamespace(subentry_type="not_a_camera", subentry_id="a")}
+    )
+    add = Mock()
+    await async_setup_entry(hass, entry, add)
+    add.assert_not_called()
+
+
+async def test_make_source_builds_mpegts_source(hass: HomeAssistant) -> None:
+    """The source factory wires the camera's details into mpegts_source."""
+    api = AsyncMock()
+    camera = _make_camera(
+        hass,
+        {CONF_SERIAL: "SN1", CONF_VERIFICATION_CODE: "CODE", CONF_STREAM: 2},
+        api=api,
+    )
+    with (
+        patch(
+            "custom_components.ezviz_stream.camera.mpegts_source", return_value="SRC"
+        ) as ms,
+        patch(
+            "custom_components.ezviz_stream.camera.get_ffmpeg_manager",
+            return_value=SimpleNamespace(binary="ffmpeg"),
+        ),
+    ):
+        result = camera._make_source()
+
+    assert result == "SRC"
+    assert ms.call_args.args[0] is api
+    assert ms.call_args.args[1] == "SN1"
+    assert ms.call_args.kwargs["stream"] == 2
+    assert ms.call_args.kwargs["verification_code"] == "CODE"
+
+
+async def test_resolve_battery_swallows_error(hass: HomeAssistant) -> None:
+    """A failed battery lookup is logged and leaves the flag unknown (never raises)."""
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(side_effect=RuntimeError("boom"))
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1"}, api=api)
+    await camera._async_resolve_battery()  # must not raise
+    assert camera.extra_state_attributes == {"battery_camera": None}
+
+
+async def test_resolve_battery_writes_state_once_added(hass: HomeAssistant) -> None:
+    """Once the entity is added, resolving battery status writes the new state."""
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(
+        return_value=[EzvizCamera("SN1", "Cam", "BatteryCamera", 1, 1, streamable=True)]
+    )
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1"}, api=api)
+    camera.entity_id = "camera.test"
+    with patch.object(camera, "async_write_ha_state") as write:
+        await camera._async_resolve_battery()
+    assert camera._is_battery is True
+    write.assert_called_once()
+
+
+async def test_schedule_refresh_skipped_when_locked(hass: HomeAssistant) -> None:
+    """No background refresh is scheduled while a grab already holds the lock."""
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1"})
+    await camera._image_lock.acquire()
+    try:
+        with patch.object(hass, "async_create_background_task") as create:
+            camera._schedule_snapshot_refresh()
+        create.assert_not_called()
+    finally:
+        camera._image_lock.release()
+
+
+async def test_background_refresh_bails_when_fresh(hass: HomeAssistant) -> None:
+    """A background refresh that finds the cache already fresh does no grab."""
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1", CONF_SNAPSHOT_INTERVAL: 100})
+    camera._image = b"FRESH" * 100
+    camera._image_at = time.monotonic()  # within TTL
+    with patch("custom_components.ezviz_stream.camera.grab_jpeg", AsyncMock()) as grab:
+        await camera._async_background_refresh()
+    grab.assert_not_called()
+
+
+async def test_background_refresh_swallows_grab_error(hass: HomeAssistant) -> None:
+    """A grab failure during background refresh is swallowed; the old frame stays."""
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(
+        return_value=[EzvizCamera("SN1", "Cam", "IPC", 1, 1, streamable=True)]
+    )
+    camera = _make_camera(
+        hass, {CONF_SERIAL: "SN1", CONF_SNAPSHOT_INTERVAL: 100}, api=api
+    )
+    camera._image = b"OLD" * 100
+    camera._image_at = 0.0  # stale
+    with (
+        patch(
+            "custom_components.ezviz_stream.camera.grab_jpeg",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ),
+        patch(
+            "custom_components.ezviz_stream.camera.get_ffmpeg_manager",
+            return_value=SimpleNamespace(binary="ffmpeg"),
+        ),
+    ):
+        await camera._async_background_refresh()  # must not raise
+    assert camera._image == b"OLD" * 100  # unchanged after the failed refresh
+
+
+async def test_static_then_motion_grabs_baseline_when_missing(
+    hass: HomeAssistant,
+) -> None:
+    """First static_motion refresh with no baseline grabs one live and persists it."""
+    api = AsyncMock()
+    api.async_get_last_motion = AsyncMock(return_value=None)  # no motion event
+    api.async_get_cameras = AsyncMock(
+        return_value=[EzvizCamera("SN1", "Cam", "IPC", 1, 1, streamable=True)]
+    )
+    camera = _make_camera(
+        hass,
+        {
+            CONF_SERIAL: "SN1",
+            CONF_VERIFICATION_CODE: "",
+            CONF_THUMBNAIL_MODE: THUMBNAIL_STATIC_MOTION,
+            CONF_STATIC_ANCHOR: 1000.0,
+        },
+        api=api,
+    )
+    with (
+        patch(
+            "custom_components.ezviz_stream.camera.grab_jpeg",
+            AsyncMock(return_value=b"BASE" * 100),
+        ) as grab,
+        patch(
+            "custom_components.ezviz_stream.camera.get_ffmpeg_manager",
+            return_value=SimpleNamespace(binary="ffmpeg"),
+        ),
+    ):
+        image = await camera.async_camera_image()
+
+    assert image == b"BASE" * 100
+    grab.assert_awaited_once()
+    assert camera._static_image == b"BASE" * 100
+    assert camera._snapshot_path.exists()  # the baseline is persisted to disk
+    await hass.async_add_executor_job(camera._snapshot_path.unlink)
+
+
+async def test_store_frame_ignores_none(hass: HomeAssistant) -> None:
+    """A None frame (a failed grab) leaves the cache untouched."""
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1"})
+    await camera._store_frame(None, persist=True)
+    assert camera._image is None
+
+
+async def test_grab_live_returns_none_when_camera_missing(
+    hass: HomeAssistant,
+) -> None:
+    """A live grab for a serial no longer on the account returns None (no session)."""
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(return_value=[])  # SN1 not present
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1"}, api=api)
+    with (
+        patch("custom_components.ezviz_stream.camera.grab_jpeg", AsyncMock()) as grab,
+        patch(
+            "custom_components.ezviz_stream.camera.get_ffmpeg_manager",
+            return_value=SimpleNamespace(binary="ffmpeg"),
+        ),
+    ):
+        result = await camera._async_grab_live()
+    assert result is None
+    grab.assert_not_called()
+
+
+async def test_static_motion_restores_baseline_on_add(hass: HomeAssistant) -> None:
+    """A restart restores the persisted frame as the static_motion baseline."""
+    data = {
+        CONF_SERIAL: "SN1",
+        CONF_VERIFICATION_CODE: "",
+        CONF_THUMBNAIL_MODE: THUMBNAIL_STATIC_MOTION,
+        CONF_IS_BATTERY: False,  # skip the battery-resolve background task
+    }
+    camera = _make_camera(hass, data)
+    await hass.async_add_executor_job(
+        _write_snapshot, camera._snapshot_path, b"BASE" * 100
+    )
+    await camera.async_added_to_hass()
+    assert camera._static_image == b"BASE" * 100  # restored baseline
+    assert camera._image == b"BASE" * 100  # also seeded as the failure fallback
+    await camera.async_will_remove_from_hass()
