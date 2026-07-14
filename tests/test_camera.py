@@ -150,6 +150,45 @@ async def test_snapshot_cached_within_ttl(hass: HomeAssistant) -> None:
     assert grab.call_count == 1  # second call served from cache
 
 
+async def test_stale_snapshot_served_immediately_then_refreshed(
+    hass: HomeAssistant,
+) -> None:
+    """A stale frame is served at once; the refresh runs in the background."""
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(
+        return_value=[EzvizCamera("SN1", "Front door", "IPC", 1, 1, streamable=True)]
+    )
+    entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(api=api, snapshot_semaphore=asyncio.Semaphore(1))
+    )
+    subentry = SimpleNamespace(
+        data={CONF_SERIAL: "SN1", CONF_VERIFICATION_CODE: ""},
+        title="Front door",
+        subentry_id="x",
+    )
+    camera = EzvizStreamCamera(entry, subentry)
+    camera.hass = hass
+    camera._image = b"OLD" * 2000
+    camera._image_at = 0.0  # far in the past -> stale
+
+    with (
+        patch(
+            "custom_components.ezviz_stream.camera.grab_jpeg",
+            AsyncMock(return_value=b"NEW" * 2000),
+        ) as grab,
+        patch(
+            "custom_components.ezviz_stream.camera.get_ffmpeg_manager",
+            return_value=SimpleNamespace(binary="ffmpeg"),
+        ),
+    ):
+        immediate = await camera.async_camera_image()
+        assert immediate == b"OLD" * 2000  # stale frame returned without blocking
+        await hass.async_block_till_done()  # let the background refresh run
+
+    assert grab.await_count == 1
+    assert camera._image == b"NEW" * 2000  # cache refreshed in the background
+
+
 def test_slow_thumbnails_uses_longer_cache_ttl() -> None:
     """The slow-thumbnails flag lengthens the snapshot cache TTL."""
     entry = SimpleNamespace(

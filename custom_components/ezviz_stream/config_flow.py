@@ -125,15 +125,20 @@ def _flatten_options(user_input: dict[str, Any]) -> dict[str, Any]:
     return flat
 
 
-def _battery_note(*, is_battery: bool) -> str:
-    """Return a battery-drain warning to append to the form description, if apt."""
-    if not is_battery:
-        return ""
+def _camera_note(*, is_battery: bool) -> str:
+    """Return a per-camera-type note for the add-form description."""
+    if is_battery:
+        return (
+            " This is a battery-powered camera: live viewing streams from the cloud "
+            "and drains the battery, so watch it only when needed (the stream runs "
+            "only while someone is watching). The lower-bandwidth sub stream is "
+            "preselected under Advanced."
+        )
     return (
-        " This is a battery-powered camera: live viewing streams from the cloud and "
-        "drains the battery, so watch it only when needed (the stream runs only while "
-        "someone is watching). The lower-bandwidth sub stream is preselected under "
-        "Advanced."
+        " This is a mains-powered camera. If it is reachable over local RTSP, the "
+        "official EZVIZ integration can stream it over your LAN (lower latency, no "
+        "cloud limits) and is the better choice where available; use this integration "
+        "for cameras without local RTSP, or when you specifically want the cloud path."
     )
 
 
@@ -339,7 +344,7 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
             ),
             description_placeholders={
                 "camera": camera.label,
-                "battery_note": _battery_note(is_battery=camera.is_battery),
+                "camera_note": _camera_note(is_battery=camera.is_battery),
             },
         )
 

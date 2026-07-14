@@ -186,55 +186,84 @@ class EzvizStreamCamera(Camera):
         height: int | None = None,  # noqa: ARG002
     ) -> bytes | None:
         """
-        Return a recent frame, grabbing one via a brief cloud session if stale.
+        Return the cached frame immediately, refreshing in the background if stale.
 
-        Grabbing drives login -> handshake -> media -> decode (seconds), so results
-        are cached for ``_SNAPSHOT_CACHE_TTL`` and grabs are serialised account-wide
-        (a dashboard of cameras must not open concurrent VTDU sessions). On failure
-        the last known frame is returned - including one restored from disk across a
-        restart - so a tile never goes blank once a frame has ever been captured.
+        Stale-while-revalidate: a grab drives login -> handshake -> media -> decode and
+        can take up to ``_SNAPSHOT_TIMEOUT`` (~30 s), but HA aborts an image request
+        after ``CAMERA_IMAGE_TIMEOUT`` (10 s). Blocking a request on a grab therefore
+        blanks the tile even though we hold a good (just-stale) frame. So we always
+        return the cached frame at once - fresh or stale, including one restored from
+        disk across a restart - and only kick a background refresh when it is stale.
+        The very first grab (no frame yet) is the only one we block on.
         """
-        if (
-            self._image is not None
-            and time.monotonic() - self._image_at < self._cache_ttl
-        ):
+        if self._image is not None:
+            if time.monotonic() - self._image_at >= self._cache_ttl:
+                self._schedule_snapshot_refresh()
             return self._image
 
+        # Cold: nothing cached yet, so block on the first grab.
         async with self._image_lock:
-            # Another waiter may have just refreshed while we waited for the lock.
+            if self._image is None:
+                await self._async_grab_into_cache()
+        return self._image
+
+    def _schedule_snapshot_refresh(self) -> None:
+        """Kick a background snapshot grab unless one is already running."""
+        if self._image_lock.locked():
+            return
+        # eager_start=False so the grab runs entirely off the request path - the
+        # caller gets the cached frame back before any of the refresh runs.
+        self.hass.async_create_background_task(
+            self._async_background_refresh(),
+            f"ezviz_stream snapshot refresh {self._serial}",
+            eager_start=False,
+        )
+
+    async def _async_background_refresh(self) -> None:
+        """Refresh the snapshot cache off the request path (never raises)."""
+        async with self._image_lock:
             if (
                 self._image is not None
                 and time.monotonic() - self._image_at < self._cache_ttl
             ):
-                return self._image
+                return  # another refresh beat us to it
+            try:
+                await self._async_grab_into_cache()
+            except Exception:  # noqa: BLE001 - a background task must not leak
+                _LOGGER.debug(
+                    "Background snapshot refresh failed for %s",
+                    self._serial,
+                    exc_info=True,
+                )
 
-            api = self._entry.runtime_data.api
-            camera = next(
-                (
-                    cam
-                    for cam in await api.async_get_cameras()
-                    if cam.serial == self._serial
-                ),
-                None,
+    async def _async_grab_into_cache(self) -> None:
+        """Grab one frame and update the in-memory + on-disk cache (holds the lock)."""
+        api = self._entry.runtime_data.api
+        camera = next(
+            (
+                cam
+                for cam in await api.async_get_cameras()
+                if cam.serial == self._serial
+            ),
+            None,
+        )
+        if camera is None:
+            _LOGGER.warning("Camera %s not found on the account", self._serial)
+            return
+
+        async with self._entry.runtime_data.snapshot_semaphore:
+            jpeg = await grab_jpeg(
+                camera,
+                api.async_get_vtdu_token,
+                get_ffmpeg_manager(self.hass).binary,
+                stream=self._stream_index,
+                verification_code=self._verification_code,
+                duration=_SNAPSHOT_TIMEOUT,
+                max_sessions=_SNAPSHOT_MAX_SESSIONS,
             )
-            if camera is None:
-                _LOGGER.warning("Camera %s not found on the account", self._serial)
-                return self._image
-
-            async with self._entry.runtime_data.snapshot_semaphore:
-                jpeg = await grab_jpeg(
-                    camera,
-                    api.async_get_vtdu_token,
-                    get_ffmpeg_manager(self.hass).binary,
-                    stream=self._stream_index,
-                    verification_code=self._verification_code,
-                    duration=_SNAPSHOT_TIMEOUT,
-                    max_sessions=_SNAPSHOT_MAX_SESSIONS,
-                )
-            if jpeg is not None:
-                self._image = jpeg
-                self._image_at = time.monotonic()
-                await self.hass.async_add_executor_job(
-                    _write_snapshot, self._snapshot_path, jpeg
-                )
-            return self._image
+        if jpeg is not None:
+            self._image = jpeg
+            self._image_at = time.monotonic()
+            await self.hass.async_add_executor_job(
+                _write_snapshot, self._snapshot_path, jpeg
+            )
