@@ -186,7 +186,7 @@ async def test_add_camera_subentry(hass: HomeAssistant) -> None:
         CONF_SNAPSHOT_INTERVAL: DEFAULT_SNAPSHOT_INTERVAL,  # mains default
         CONF_STREAM: 1,  # main stream by default
         CONF_IS_BATTERY: False,
-        CONF_IS_ENCRYPTED: False,
+        # CONF_IS_ENCRYPTED omitted: encryption status is unknown for this test cam
     }
 
 
@@ -290,7 +290,7 @@ async def test_reconfigure_camera_subentry(hass: HomeAssistant) -> None:
         CONF_SNAPSHOT_INTERVAL: 900,
         CONF_STREAM: 2,  # switched to sub stream
         CONF_IS_BATTERY: False,  # resolved from the account (SN1 is IPC)
-        CONF_IS_ENCRYPTED: False,
+        # CONF_IS_ENCRYPTED omitted: _CAMERAS leaves encryption status unknown
     }
 
 
@@ -341,6 +341,36 @@ async def test_encrypted_camera_requires_and_validates_code(
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_IS_ENCRYPTED] is True
     assert result["data"][CONF_VERIFICATION_CODE] == "ABCDEF"
+
+
+async def test_unencrypted_camera_hides_verification_code(
+    hass: HomeAssistant,
+) -> None:
+    """A definitively-unencrypted camera hides the code field and saves without one."""
+    entry = _account_entry()
+    entry.add_to_hass(hass)
+    cam = EzvizCamera(
+        "SNU", "Clear cam", "IPC", 1, 1, streamable=True, is_encrypted=False
+    )
+    with _patch_api(cameras=[cam]), _patch_frame_grab(ok=True):
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, CAMERA_SUBENTRY_TYPE), context={"source": SOURCE_USER}
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {CONF_SERIAL: "SNU"}
+        )
+        assert result["step_id"] == "options"
+        keys = {marker.schema for marker in result["data_schema"].schema}
+        assert CONF_VERIFICATION_CODE not in keys  # hidden for a clear camera
+
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {"advanced": {}}
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_IS_ENCRYPTED] is False
+    assert result["data"][CONF_VERIFICATION_CODE] == ""
 
 
 async def test_add_camera_frame_check_fails_then_save_anyway(

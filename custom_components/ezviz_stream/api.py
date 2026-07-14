@@ -26,6 +26,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 15
 _HTTP_OK = 200
+_NOT_LOGGED_IN = "not logged in"  # raised by control-plane calls before async_login
 _LOGIN_PATH = "/v3/users/login/v5"
 _PAGELIST_PATH = (
     "/v3/userdevices/v1/resources/pagelist"
@@ -91,7 +92,8 @@ class EzvizCamera:
     vtm_ip: str | None = None
     vtm_port: int | None = None
     biz: str = ""  # streamBizUrl query fragment appended to the stream URL
-    is_encrypted: bool = False  # STATUS.isEncrypt - Image Encryption is on
+    # STATUS.isEncrypt: True/False when known, None if the device didn't report it.
+    is_encrypted: bool | None = None
     encrypt_pwd_hash: str = ""  # STATUS.encryptPwd - double-MD5 of the code (A.5)
 
     @property
@@ -106,8 +108,13 @@ class EzvizCamera:
 
     @property
     def label(self) -> str:
-        """A human-friendly label for the config-flow picker."""
+        """A human-friendly label (the camera name, or the serial if unnamed)."""
         return self.name or self.serial
+
+    @property
+    def picker_label(self) -> str:
+        """Config-flow picker label: 'Name (Serial)', or just the serial if unnamed."""
+        return f"{self.name} ({self.serial})" if self.name else self.serial
 
 
 def _api_host(region: str) -> str:
@@ -180,21 +187,10 @@ class EzvizCloudApi:
             body = await self._post(f"{host}{_LOGIN_PATH}", data)
             code = (body.get("meta") or {}).get("code")
             if code == _HTTP_OK:
-                session_id = (body.get("loginSession") or {}).get("sessionId")
-                if not session_id:
-                    msg = "login succeeded but no session id returned"
-                    raise CannotConnect(msg)
-                new_host = (body.get("loginArea") or {}).get("apiDomain")
-                self._host = _normalise_host(new_host) or host
-                self._session_id = session_id
+                self._store_session(body, host)
                 return
             if code == _REGION_REDIRECT_CODE:
-                area = body.get("loginArea") or {}
-                new_host = _normalise_host(area.get("apiDomain"))
-                if not new_host:
-                    msg = "region redirect without a host to retry"
-                    raise CannotConnect(msg)
-                host = new_host
+                host = _redirect_host(body)
                 continue
             if code == _MFA_CODE:
                 raise MfaRequired
@@ -202,11 +198,20 @@ class EzvizCloudApi:
         msg = "exhausted region-redirect retries"
         raise CannotConnect(msg)
 
+    def _store_session(self, body: dict[str, Any], fallback_host: str) -> None:
+        """Cache the session id + resolved host from a successful login body."""
+        session_id = (body.get("loginSession") or {}).get("sessionId")
+        if not session_id:
+            msg = "login succeeded but no session id returned"
+            raise CannotConnect(msg)
+        new_host = (body.get("loginArea") or {}).get("apiDomain")
+        self._host = _normalise_host(new_host) or fallback_host
+        self._session_id = session_id
+
     async def async_get_cameras(self) -> list[EzvizCamera]:
         """Return the streamable cameras on the account. Requires a prior login."""
         if not self._session_id or not self._host:
-            msg = "not logged in"
-            raise EzvizStreamApiError(msg)
+            raise EzvizStreamApiError(_NOT_LOGGED_IN)
         body = await self._get(f"{self._host}{_PAGELIST_PATH}")
 
         vtm_map = _deep_find(body, "VTM") or {}
@@ -235,7 +240,9 @@ class EzvizCloudApi:
                     vtm_ip=vtm.get("externalIp"),
                     vtm_port=int(vtm["port"]) if vtm.get("port") else None,
                     biz=resource.get("streamBizUrl", ""),
-                    is_encrypted=bool(status.get("isEncrypt")),
+                    is_encrypted=(
+                        bool(status["isEncrypt"]) if "isEncrypt" in status else None
+                    ),
                     encrypt_pwd_hash=str(status.get("encryptPwd") or ""),
                 )
             )
@@ -253,8 +260,7 @@ class EzvizCloudApi:
         verification code (reference B.10.2); a wrong code yields None.
         """
         if not self._session_id or not self._host:
-            msg = "not logged in"
-            raise EzvizStreamApiError(msg)
+            raise EzvizStreamApiError(_NOT_LOGGED_IN)
         body = await self._get(f"{self._host}{_ALARM_PATH}{serial}")
         if (body.get("meta") or {}).get("code") != _HTTP_OK:
             return None
@@ -275,8 +281,7 @@ class EzvizCloudApi:
     async def async_get_vtdu_token(self) -> str:
         """Fetch a VTDU media token (needed per streaming session). Requires login."""
         if not self._session_id or not self._host:
-            msg = "not logged in"
-            raise EzvizStreamApiError(msg)
+            raise EzvizStreamApiError(_NOT_LOGGED_IN)
         auth_addr = await self._async_auth_addr()
         # sign = the `s` claim from the sessionId JWT payload (reference A.6).
         payload_seg = self._session_id.split(".")[1]
@@ -354,3 +359,13 @@ def _normalise_host(host: str | None) -> str | None:
     if not host:
         return None
     return host if host.startswith("http") else f"https://{host}"
+
+
+def _redirect_host(body: dict[str, Any]) -> str:
+    """Return the retry host from a region-redirect (1100) login body."""
+    area = body.get("loginArea") or {}
+    new_host = _normalise_host(area.get("apiDomain"))
+    if not new_host:
+        msg = "region redirect without a host to retry"
+        raise CannotConnect(msg)
+    return new_host

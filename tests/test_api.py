@@ -83,7 +83,30 @@ async def test_login_success_and_cameras() -> None:
     assert cam.biz == "biz=1"
     assert cam.is_online
     assert cam.is_encrypted is True  # from STATUS.isEncrypt
-    assert cam.encrypt_pwd_hash == "deadbeefhash"  # noqa: S105 - a hash, not a secret
+    # S105: a test fixture hash, not a real secret.
+    assert cam.encrypt_pwd_hash == "deadbeefhash"  # noqa: S105
+    assert cam.picker_label == "Front door (SN1)"  # name + serial for the picker
+
+
+async def test_is_encrypted_tristate() -> None:
+    """Encryption is True/False when the device reports it, None when it does not."""
+
+    def _pagelist(status: dict[str, Any]) -> dict[str, Any]:
+        return {**_PAGELIST, "STATUS": status}
+
+    api_off = EzvizCloudApi(
+        _session(
+            {"users/login": _LOGIN_OK, "pagelist": _pagelist({"SN1": {"isEncrypt": 0}})}
+        )
+    )
+    await api_off.async_login("user@example.com", "pw", "Europe")
+    assert (await api_off.async_get_cameras())[0].is_encrypted is False
+
+    api_unknown = EzvizCloudApi(
+        _session({"users/login": _LOGIN_OK, "pagelist": _pagelist({})})
+    )
+    await api_unknown.async_login("user@example.com", "pw", "Europe")
+    assert (await api_unknown.async_get_cameras())[0].is_encrypted is None
 
 
 @pytest.mark.parametrize(

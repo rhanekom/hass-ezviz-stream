@@ -6,10 +6,15 @@ cover the producer's camera selection and error path with mocks.
 
 from __future__ import annotations
 
+import json
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.ezviz_stream import producer
 from custom_components.ezviz_stream.api import EzvizCamera
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _mock_session() -> MagicMock:
@@ -72,3 +77,33 @@ async def test_run_missing_camera_returns_error() -> None:
         )
 
     assert result == 1
+
+
+def test_main_reads_creds_file_and_runs(tmp_path: Path) -> None:
+    """main() parses --creds-file, loads the JSON, and runs the async producer."""
+    creds = {"username": "u", "password": "p", "region": "Europe", "serial": "SN1"}
+    creds_file = tmp_path / "creds.json"
+    creds_file.write_text(json.dumps(creds))
+
+    with (
+        patch("sys.argv", ["producer", "--creds-file", str(creds_file)]),
+        patch.object(producer, "_run", MagicMock(return_value="COROUTINE")) as run,
+        patch.object(producer.asyncio, "run", MagicMock(return_value=0)) as asyncio_run,
+    ):
+        assert producer.main() == 0
+
+    assert run.call_args.args[0] == creds  # the parsed creds were passed to _run
+    asyncio_run.assert_called_once_with("COROUTINE")
+
+
+def test_main_handles_keyboard_interrupt(tmp_path: Path) -> None:
+    """Ctrl-C during streaming is a clean exit (status 0)."""
+    creds_file = tmp_path / "creds.json"
+    creds_file.write_text(json.dumps({"serial": "SN1"}))
+
+    with (
+        patch("sys.argv", ["producer", "--creds-file", str(creds_file)]),
+        patch.object(producer, "_run", MagicMock(return_value="C")),
+        patch.object(producer.asyncio, "run", MagicMock(side_effect=KeyboardInterrupt)),
+    ):
+        assert producer.main() == 0

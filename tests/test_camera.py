@@ -13,6 +13,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.ezviz_stream import async_remove_config_entry_device
 from custom_components.ezviz_stream.api import EzvizCamera
 from custom_components.ezviz_stream.camera import EzvizStreamCamera
 from custom_components.ezviz_stream.const import (
@@ -107,6 +108,75 @@ async def test_camera_created_when_subentry_added_after_setup(
         await hass.async_block_till_done()
 
     assert er.async_get(hass).async_get_entity_id("camera", DOMAIN, "SN9") is not None
+
+
+def _entry_with_two_cameras() -> MockConfigEntry:
+    return MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="user@example.com",
+        data=_ACCOUNT,
+        subentries_data=[
+            ConfigSubentryData(
+                data={CONF_SERIAL: serial, CONF_VERIFICATION_CODE: ""},
+                subentry_type=CAMERA_SUBENTRY_TYPE,
+                title=serial,
+                unique_id=serial,
+            )
+            for serial in ("SN1", "SN2")
+        ],
+    )
+
+
+async def test_removing_one_camera_keeps_the_others(hass: HomeAssistant) -> None:
+    """Deleting one camera subentry leaves the others - and does not reload."""
+    entry = _entry_with_two_cameras()
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.ezviz_stream.EzvizCloudApi",
+        return_value=AsyncMock(async_login=AsyncMock(return_value=None)),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        registry = er.async_get(hass)
+        assert registry.async_get_entity_id("camera", DOMAIN, "SN1") is not None
+        assert registry.async_get_entity_id("camera", DOMAIN, "SN2") is not None
+
+        sid1 = next(
+            sid for sid, se in entry.subentries.items() if se.data[CONF_SERIAL] == "SN1"
+        )
+        # A pure removal must not trigger a reload (which would re-login the account).
+        with patch.object(hass.config_entries, "async_reload", AsyncMock()) as reload:
+            hass.config_entries.async_remove_subentry(entry, sid1)
+            await hass.async_block_till_done()
+        reload.assert_not_called()
+
+    assert registry.async_get_entity_id("camera", DOMAIN, "SN1") is None  # removed
+    assert registry.async_get_entity_id("camera", DOMAIN, "SN2") is not None  # kept
+
+
+async def test_remove_config_entry_device_removes_only_that_camera(
+    hass: HomeAssistant,
+) -> None:
+    """Deleting a camera's device removes just its subentry, not the account."""
+    entry = _entry_with_two_cameras()
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.ezviz_stream.EzvizCloudApi",
+        return_value=AsyncMock(async_login=AsyncMock(return_value=None)),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        device = dr.async_get(hass).async_get_device(
+            identifiers={(OFFICIAL_EZVIZ_DOMAIN, "SN1")}
+        )
+        assert device is not None
+
+        removed = await async_remove_config_entry_device(hass, entry, device)
+        await hass.async_block_till_done()
+
+    assert removed is True
+    serials = {se.data[CONF_SERIAL] for se in entry.subentries.values()}
+    assert serials == {"SN2"}  # only SN1 removed; the account entry survives
 
 
 async def test_snapshot_cached_within_ttl(hass: HomeAssistant) -> None:

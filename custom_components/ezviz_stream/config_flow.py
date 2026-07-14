@@ -99,7 +99,7 @@ _VERIFY_MAX_SESSIONS = 3
 def _camera_options_schema(
     *,
     verification_code: str,
-    code_required: bool,
+    is_encrypted: bool | None,
     thumbnail_mode: str,
     snapshot_interval: int,
     stream: int,
@@ -107,70 +107,69 @@ def _camera_options_schema(
     """
     Build the schema for a camera's editable settings (add + reconfigure).
 
-    Only the verification code is shown up front (required when the device has Image
-    Encryption on); the thumbnail source, refresh interval, and stream (all with
-    sensible defaults) live in a collapsed 'advanced' section.
+    The verification code is shown up front unless the device is *definitively*
+    unencrypted (``is_encrypted`` is False) - then it is hidden, since no code is
+    needed; it stays visible (and required) when encryption is on, and visible
+    (optional) when the status is unknown. The thumbnail source, refresh interval,
+    and stream (all with sensible defaults) live in a collapsed 'advanced' section.
     """
-    code_key = vol.Required if code_required else vol.Optional
-    return vol.Schema(
-        {
-            code_key(CONF_VERIFICATION_CODE, default=verification_code): TextSelector(
-                TextSelectorConfig(type=TextSelectorType.PASSWORD)
-            ),
-            vol.Required(_ADVANCED): section(
-                vol.Schema(
-                    {
-                        vol.Required(
-                            CONF_THUMBNAIL_MODE, default=thumbnail_mode
-                        ): SelectSelector(
-                            SelectSelectorConfig(
-                                options=[
-                                    SelectOptionDict(
-                                        value=THUMBNAIL_INTERVAL,
-                                        label="Live snapshot (refreshed on a schedule)",
-                                    ),
-                                    SelectOptionDict(
-                                        value=THUMBNAIL_MOTION,
-                                        label="Latest motion image (no camera wake)",
-                                    ),
-                                    SelectOptionDict(
-                                        value=THUMBNAIL_STATIC,
-                                        label="Static image (captured once)",
-                                    ),
-                                ],
-                                mode=SelectSelectorMode.DROPDOWN,
-                            )
-                        ),
-                        vol.Required(
-                            CONF_SNAPSHOT_INTERVAL, default=snapshot_interval
-                        ): NumberSelector(
-                            NumberSelectorConfig(
-                                min=MIN_SNAPSHOT_INTERVAL,
-                                max=MAX_SNAPSHOT_INTERVAL,
-                                step=15,
-                                mode=NumberSelectorMode.BOX,
-                                unit_of_measurement="seconds",
-                            )
-                        ),
-                        vol.Required(CONF_STREAM, default=str(stream)): SelectSelector(
-                            SelectSelectorConfig(
-                                options=[
-                                    SelectOptionDict(
-                                        value=str(MAIN_STREAM), label="Main (HD)"
-                                    ),
-                                    SelectOptionDict(
-                                        value=str(SUB_STREAM), label="Sub (lower-res)"
-                                    ),
-                                ],
-                                mode=SelectSelectorMode.DROPDOWN,
-                            )
-                        ),
-                    }
+    schema: dict[Any, Any] = {}
+    if is_encrypted is not False:  # show unless we know it is unencrypted
+        code_key = vol.Required if is_encrypted else vol.Optional
+        schema[code_key(CONF_VERIFICATION_CODE, default=verification_code)] = (
+            TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+        )
+    schema[vol.Required(_ADVANCED)] = section(
+        vol.Schema(
+            {
+                vol.Required(
+                    CONF_THUMBNAIL_MODE, default=thumbnail_mode
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(
+                                value=THUMBNAIL_INTERVAL,
+                                label="Live snapshot (refreshed on a schedule)",
+                            ),
+                            SelectOptionDict(
+                                value=THUMBNAIL_MOTION,
+                                label="Latest motion image (no camera wake)",
+                            ),
+                            SelectOptionDict(
+                                value=THUMBNAIL_STATIC,
+                                label="Static image (captured once)",
+                            ),
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
                 ),
-                {"collapsed": True},
-            ),
-        }
+                vol.Required(
+                    CONF_SNAPSHOT_INTERVAL, default=snapshot_interval
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=MIN_SNAPSHOT_INTERVAL,
+                        max=MAX_SNAPSHOT_INTERVAL,
+                        step=15,
+                        mode=NumberSelectorMode.BOX,
+                        unit_of_measurement="seconds",
+                    )
+                ),
+                vol.Required(CONF_STREAM, default=str(stream)): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=str(MAIN_STREAM), label="Main (HD)"),
+                            SelectOptionDict(
+                                value=str(SUB_STREAM), label="Sub (lower-res)"
+                            ),
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+            }
+        ),
+        {"collapsed": True},
     )
+    return vol.Schema(schema)
 
 
 def _flatten_options(user_input: dict[str, Any]) -> dict[str, Any]:
@@ -226,6 +225,26 @@ def _yes_no(value: bool | None) -> str:  # noqa: FBT001 - simple display formatt
     if value is None:
         return "Unknown"
     return "Yes" if value else "No"
+
+
+def _code_hint(is_encrypted: bool | None) -> str:  # noqa: FBT001 - display formatter
+    """
+    Verification-code sentence for the form description, matching the code field.
+
+    Empty when the field is hidden (definitively unencrypted), so the description
+    never tells the user to enter a code that is not shown.
+    """
+    if is_encrypted is False:
+        return ""
+    if is_encrypted:
+        return (
+            "This camera has Image Encryption on - enter its verification code "
+            "(the 6-character code on the camera label). "
+        )
+    return (
+        "If this camera has Image Encryption on, enter its verification code (the "
+        "6-character code on the camera label); leave blank otherwise. "
+    )
 
 
 def _code_error(code: str, *, is_encrypted: bool | None, pwd_hash: str) -> str | None:
@@ -448,7 +467,7 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
                 vol.Required(CONF_SERIAL): SelectSelector(
                     SelectSelectorConfig(
                         options=[
-                            SelectOptionDict(value=cam.serial, label=cam.label)
+                            SelectOptionDict(value=cam.serial, label=cam.picker_label)
                             for cam in available
                         ],
                         mode=SelectSelectorMode.DROPDOWN,
@@ -497,7 +516,7 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
             step_id="options",
             data_schema=_camera_options_schema(
                 verification_code="",
-                code_required=camera.is_encrypted,
+                is_encrypted=camera.is_encrypted,
                 thumbnail_mode=THUMBNAIL_MOTION if battery else THUMBNAIL_INTERVAL,
                 snapshot_interval=(
                     DEFAULT_SNAPSHOT_INTERVAL_BATTERY
@@ -512,6 +531,7 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
                 "serial": camera.serial,
                 "battery": _yes_no(camera.is_battery),
                 "encrypted": _yes_no(camera.is_encrypted),
+                "code_hint": _code_hint(camera.is_encrypted),
                 "camera_note": _camera_note(is_battery=camera.is_battery),
             },
         )
@@ -553,7 +573,7 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
             step_id="reconfigure",
             data_schema=_camera_options_schema(
                 verification_code=subentry.data.get(CONF_VERIFICATION_CODE, ""),
-                code_required=bool(is_encrypted),
+                is_encrypted=is_encrypted,
                 thumbnail_mode=subentry.data.get(CONF_THUMBNAIL_MODE)
                 or (
                     THUMBNAIL_MOTION
@@ -569,6 +589,7 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
                 "serial": subentry.data[CONF_SERIAL],
                 "battery": _yes_no(is_battery),
                 "encrypted": _yes_no(is_encrypted),
+                "code_hint": _code_hint(is_encrypted),
             },
         )
 
