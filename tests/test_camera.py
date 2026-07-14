@@ -17,9 +17,11 @@ from custom_components.ezviz_stream.api import EzvizCamera
 from custom_components.ezviz_stream.camera import EzvizStreamCamera
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_MOTION_THUMBNAIL,
     CONF_REGION,
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
+    CONF_SNAPSHOT_INTERVAL,
     CONF_VERIFICATION_CODE,
     DOMAIN,
     OFFICIAL_EZVIZ_DOMAIN,
@@ -189,8 +191,26 @@ async def test_stale_snapshot_served_immediately_then_refreshed(
     assert camera._image == b"NEW" * 2000  # cache refreshed in the background
 
 
-def test_slow_thumbnails_uses_longer_cache_ttl() -> None:
-    """The slow-thumbnails flag lengthens the snapshot cache TTL."""
+def test_snapshot_interval_sets_cache_ttl() -> None:
+    """The configured snapshot interval is the camera's cache TTL."""
+    entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(
+            api=AsyncMock(), snapshot_semaphore=asyncio.Semaphore(1)
+        )
+    )
+    camera = EzvizStreamCamera(
+        entry,
+        SimpleNamespace(
+            data={CONF_SERIAL: "SN1", CONF_SNAPSHOT_INTERVAL: 120},
+            title="Cam",
+            subentry_id="x",
+        ),
+    )
+    assert camera._cache_ttl == 120
+
+
+def test_legacy_slow_thumbnails_maps_to_interval() -> None:
+    """Subentries predating the interval map the old boolean to a sensible TTL."""
     entry = SimpleNamespace(
         runtime_data=SimpleNamespace(
             api=AsyncMock(), snapshot_semaphore=asyncio.Semaphore(1)
@@ -208,6 +228,73 @@ def test_slow_thumbnails_uses_longer_cache_ttl() -> None:
         )
 
     assert _cam(slow=True)._cache_ttl > _cam(slow=False)._cache_ttl
+
+
+async def test_motion_thumbnail_uses_alarm_image(hass: HomeAssistant) -> None:
+    """With the motion-thumbnail option on, the tile comes from the alarm image."""
+    api = AsyncMock()
+    api.async_get_last_motion_image = AsyncMock(return_value=b"MOTION" * 100)
+    entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(api=api, snapshot_semaphore=asyncio.Semaphore(1))
+    )
+    subentry = SimpleNamespace(
+        data={
+            CONF_SERIAL: "SN1",
+            CONF_VERIFICATION_CODE: "ABCDEF",
+            CONF_MOTION_THUMBNAIL: True,
+        },
+        title="Cam",
+        subentry_id="x",
+    )
+    camera = EzvizStreamCamera(entry, subentry)
+    camera.hass = hass
+
+    with patch("custom_components.ezviz_stream.camera.grab_jpeg", AsyncMock()) as grab:
+        image = await camera.async_camera_image()
+
+    assert image == b"MOTION" * 100
+    api.async_get_last_motion_image.assert_awaited_once_with(
+        "SN1", verification_code="ABCDEF"
+    )
+    grab.assert_not_called()  # the camera was never woken for a live grab
+
+
+async def test_motion_thumbnail_seeds_with_live_grab(hass: HomeAssistant) -> None:
+    """No stored motion image yet + nothing cached -> seed once with a live grab."""
+    api = AsyncMock()
+    api.async_get_last_motion_image = AsyncMock(return_value=None)
+    api.async_get_cameras = AsyncMock(
+        return_value=[EzvizCamera("SN1", "Cam", "BatteryCamera", 1, 1, streamable=True)]
+    )
+    entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(api=api, snapshot_semaphore=asyncio.Semaphore(1))
+    )
+    subentry = SimpleNamespace(
+        data={
+            CONF_SERIAL: "SN1",
+            CONF_VERIFICATION_CODE: "",
+            CONF_MOTION_THUMBNAIL: True,
+        },
+        title="Cam",
+        subentry_id="x",
+    )
+    camera = EzvizStreamCamera(entry, subentry)
+    camera.hass = hass
+
+    with (
+        patch(
+            "custom_components.ezviz_stream.camera.grab_jpeg",
+            AsyncMock(return_value=b"SEED" * 100),
+        ) as grab,
+        patch(
+            "custom_components.ezviz_stream.camera.get_ffmpeg_manager",
+            return_value=SimpleNamespace(binary="ffmpeg"),
+        ),
+    ):
+        image = await camera.async_camera_image()
+
+    assert image == b"SEED" * 100
+    grab.assert_awaited_once()  # seeded via one live grab when no motion image
 
 
 async def test_snapshot_persisted_and_restored_across_restart(

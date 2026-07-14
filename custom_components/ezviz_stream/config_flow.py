@@ -50,17 +50,23 @@ from .api import (
 from .const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_MAX_SNAPSHOTS,
+    CONF_MOTION_THUMBNAIL,
     CONF_REGION,
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
+    CONF_SNAPSHOT_INTERVAL,
     CONF_STREAM,
     CONF_VERIFICATION_CODE,
     DEFAULT_MAX_SNAPSHOTS,
     DEFAULT_REGION,
+    DEFAULT_SNAPSHOT_INTERVAL,
+    DEFAULT_SNAPSHOT_INTERVAL_BATTERY,
     DEFAULT_STREAM,
     DOMAIN,
     MAIN_STREAM,
     MAX_MAX_SNAPSHOTS,
+    MAX_SNAPSHOT_INTERVAL,
+    MIN_SNAPSHOT_INTERVAL,
     REGION_API_CODES,
     SUB_STREAM,
 )
@@ -85,13 +91,18 @@ _VERIFY_MAX_SESSIONS = 3
 
 
 def _camera_options_schema(
-    *, verification_code: str, slow_thumbnails: bool, stream: int
+    *,
+    verification_code: str,
+    motion_thumbnail: bool,
+    snapshot_interval: int,
+    stream: int,
 ) -> vol.Schema:
     """
     Build the schema for a camera's editable settings (add + reconfigure).
 
-    Only the verification code is shown up front; the cadence and stream (both with
-    sensible defaults) live in a collapsed 'advanced' section.
+    Only the verification code is shown up front; the motion-thumbnail toggle,
+    refresh interval, and stream (all with sensible defaults) live in a collapsed
+    'advanced' section.
     """
     return vol.Schema(
         {
@@ -102,8 +113,19 @@ def _camera_options_schema(
                 vol.Schema(
                     {
                         vol.Required(
-                            CONF_SLOW_THUMBNAILS, default=slow_thumbnails
+                            CONF_MOTION_THUMBNAIL, default=motion_thumbnail
                         ): BooleanSelector(),
+                        vol.Required(
+                            CONF_SNAPSHOT_INTERVAL, default=snapshot_interval
+                        ): NumberSelector(
+                            NumberSelectorConfig(
+                                min=MIN_SNAPSHOT_INTERVAL,
+                                max=MAX_SNAPSHOT_INTERVAL,
+                                step=15,
+                                mode=NumberSelectorMode.BOX,
+                                unit_of_measurement="seconds",
+                            )
+                        ),
                         vol.Required(CONF_STREAM, default=str(stream)): SelectSelector(
                             SelectSelectorConfig(
                                 options=[
@@ -154,9 +176,21 @@ def _camera_subentry_data(serial: str, user_input: dict[str, Any]) -> dict[str, 
     return {
         CONF_SERIAL: serial,
         CONF_VERIFICATION_CODE: user_input.get(CONF_VERIFICATION_CODE, ""),
-        CONF_SLOW_THUMBNAILS: user_input.get(CONF_SLOW_THUMBNAILS, False),
+        CONF_MOTION_THUMBNAIL: user_input.get(CONF_MOTION_THUMBNAIL, False),
+        CONF_SNAPSHOT_INTERVAL: int(
+            user_input.get(CONF_SNAPSHOT_INTERVAL, DEFAULT_SNAPSHOT_INTERVAL)
+        ),
         CONF_STREAM: int(user_input[CONF_STREAM]),
     }
+
+
+def _stored_interval(data: Mapping[str, Any]) -> int:
+    """Return the saved refresh interval, mapping the legacy boolean when needed."""
+    if CONF_SNAPSHOT_INTERVAL in data:
+        return int(data[CONF_SNAPSHOT_INTERVAL])
+    if data.get(CONF_SLOW_THUMBNAILS):
+        return DEFAULT_SNAPSHOT_INTERVAL_BATTERY
+    return DEFAULT_SNAPSHOT_INTERVAL
 
 
 _ACCOUNT_SCHEMA = vol.Schema(
@@ -381,14 +415,20 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
             self._pending_data, self._pending_subentry = data, None
             return await self.async_step_verify_failed()
 
-        # Battery cams default to the slower cadence and the lower-bandwidth sub
-        # stream (kinder to the battery and a weak link); the user can override both.
+        # Battery cams default to the motion thumbnail (never woken for a tile), a
+        # long refresh interval, and the lower-bandwidth sub stream; all overridable.
+        battery = camera.is_battery
         return self.async_show_form(
             step_id="options",
             data_schema=_camera_options_schema(
                 verification_code="",
-                slow_thumbnails=camera.is_battery,
-                stream=SUB_STREAM if camera.is_battery else DEFAULT_STREAM,
+                motion_thumbnail=battery,
+                snapshot_interval=(
+                    DEFAULT_SNAPSHOT_INTERVAL_BATTERY
+                    if battery
+                    else DEFAULT_SNAPSHOT_INTERVAL
+                ),
+                stream=SUB_STREAM if battery else DEFAULT_STREAM,
             ),
             description_placeholders={
                 "camera": camera.label,
@@ -416,7 +456,8 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
             step_id="reconfigure",
             data_schema=_camera_options_schema(
                 verification_code=subentry.data.get(CONF_VERIFICATION_CODE, ""),
-                slow_thumbnails=subentry.data.get(CONF_SLOW_THUMBNAILS, False),
+                motion_thumbnail=subentry.data.get(CONF_MOTION_THUMBNAIL, False),
+                snapshot_interval=_stored_interval(subentry.data),
                 stream=subentry.data.get(CONF_STREAM, DEFAULT_STREAM),
             ),
             description_placeholders={"camera": subentry.title},

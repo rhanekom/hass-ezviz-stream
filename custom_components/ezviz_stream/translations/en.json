@@ -67,8 +67,13 @@
             "advanced": {
               "name": "Advanced",
               "data": {
-                "slow_thumbnails": "Slow thumbnail refresh (recommended for battery cameras)",
+                "motion_thumbnail": "Use last motion image as thumbnail (recommended for battery cameras)",
+                "snapshot_interval": "Thumbnail refresh interval (seconds)",
                 "stream": "Video stream"
+              },
+              "data_description": {
+                "motion_thumbnail": "Show the camera's most recent cloud motion snapshot instead of grabbing a live frame, so a battery camera is never woken just to fill a thumbnail.",
+                "snapshot_interval": "How often a thumbnail that is being viewed refreshes. A longer interval wakes battery cameras less often (only applies when the motion image is off)."
               }
             }
           }
@@ -83,8 +88,13 @@
             "advanced": {
               "name": "Advanced",
               "data": {
-                "slow_thumbnails": "Slow thumbnail refresh (recommended for battery cameras)",
+                "motion_thumbnail": "Use last motion image as thumbnail (recommended for battery cameras)",
+                "snapshot_interval": "Thumbnail refresh interval (seconds)",
                 "stream": "Video stream"
+              },
+              "data_description": {
+                "motion_thumbnail": "Show the camera's most recent cloud motion snapshot instead of grabbing a live frame, so a battery camera is never woken just to fill a thumbnail.",
+                "snapshot_interval": "How often a thumbnail that is being viewed refreshes. A longer interval wakes battery cameras less often (only applies when the motion image is off)."
               }
             }
           }

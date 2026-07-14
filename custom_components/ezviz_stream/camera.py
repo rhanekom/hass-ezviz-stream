@@ -17,10 +17,14 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from .broadcast import CameraBroadcast, mpegts_source
 from .const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_MOTION_THUMBNAIL,
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
+    CONF_SNAPSHOT_INTERVAL,
     CONF_STREAM,
     CONF_VERIFICATION_CODE,
+    DEFAULT_SNAPSHOT_INTERVAL,
+    DEFAULT_SNAPSHOT_INTERVAL_BATTERY,
     DEFAULT_STREAM,
     MANUFACTURER,
     OFFICIAL_EZVIZ_DOMAIN,
@@ -34,11 +38,6 @@ _LOGGER = logging.getLogger(__name__)
 # fetch does not hang. Efficient live view arrives with go2rtc (Milestone C).
 _SNAPSHOT_TIMEOUT = 30.0
 _SNAPSHOT_MAX_SESSIONS = 3  # limit reconnect churn per image request
-# Serve a cached frame for this long so HA's image polling does not re-stream on
-# every poll (each grab is a full cloud session). Battery cams (and any camera the
-# user flags) use the slower cadence - they wake slowly and streaming drains them.
-_SNAPSHOT_CACHE_TTL = 30.0
-_SNAPSHOT_CACHE_TTL_SLOW = 300.0
 # The last good frame is persisted here so a cold start (the in-memory cache is empty
 # after a restart) falls back to it instead of a blank tile until a fresh grab
 # succeeds. It is camera imagery at rest: kept in the HA config dir, owner-only
@@ -54,6 +53,16 @@ if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
     from . import EzvizStreamConfigEntry
+
+
+def _resolve_interval(data: dict[str, object]) -> float:
+    """Resolve a camera's snapshot cache TTL from its subentry data (seconds)."""
+    if CONF_SNAPSHOT_INTERVAL in data:
+        return float(data[CONF_SNAPSHOT_INTERVAL])  # type: ignore[arg-type]
+    # Legacy subentries predate the explicit interval: map the old boolean flag.
+    if data.get(CONF_SLOW_THUMBNAILS):
+        return float(DEFAULT_SNAPSHOT_INTERVAL_BATTERY)
+    return float(DEFAULT_SNAPSHOT_INTERVAL)
 
 
 def _write_snapshot(path: Path, data: bytes) -> None:
@@ -105,7 +114,8 @@ class EzvizStreamCamera(Camera):
         self._entry = entry
         self._serial: str = subentry.data[CONF_SERIAL]
         self._verification_code: str = subentry.data.get(CONF_VERIFICATION_CODE, "")
-        self._slow_thumbnails: bool = subentry.data.get(CONF_SLOW_THUMBNAILS, False)
+        self._motion_thumbnail: bool = subentry.data.get(CONF_MOTION_THUMBNAIL, False)
+        self._snapshot_interval: float = _resolve_interval(subentry.data)
         self._stream_index: int = subentry.data.get(CONF_STREAM, DEFAULT_STREAM)
         self._attr_unique_id = self._serial
         self._image: bytes | None = None  # last decoded frame (snapshot cache)
@@ -142,10 +152,8 @@ class EzvizStreamCamera(Camera):
 
     @property
     def _cache_ttl(self) -> float:
-        """How long a grabbed frame stays fresh (longer for slow/battery cams)."""
-        return (
-            _SNAPSHOT_CACHE_TTL_SLOW if self._slow_thumbnails else _SNAPSHOT_CACHE_TTL
-        )
+        """How long a cached frame stays fresh (the per-camera refresh interval)."""
+        return self._snapshot_interval
 
     async def async_added_to_hass(self) -> None:
         """Register the broadcaster and restore the last frame as a failure fallback."""
@@ -237,7 +245,33 @@ class EzvizStreamCamera(Camera):
                 )
 
     async def _async_grab_into_cache(self) -> None:
-        """Grab one frame and update the in-memory + on-disk cache (holds the lock)."""
+        """Refresh the in-memory + on-disk cache with a new frame (holds the lock)."""
+        if self._motion_thumbnail:
+            jpeg = await self._async_fetch_motion_image()
+            # Seed once: if there is no stored motion image yet and nothing cached,
+            # do a single live grab so the tile is not blank; later refreshes stay
+            # on the (no-wake) motion image.
+            if jpeg is None and self._image is None:
+                jpeg = await self._async_grab_live()
+        else:
+            jpeg = await self._async_grab_live()
+
+        if jpeg is not None:
+            self._image = jpeg
+            self._image_at = time.monotonic()
+            await self.hass.async_add_executor_job(
+                _write_snapshot, self._snapshot_path, jpeg
+            )
+
+    async def _async_fetch_motion_image(self) -> bytes | None:
+        """Fetch the last cloud motion image for the thumbnail (no camera wake)."""
+        api = self._entry.runtime_data.api
+        return await api.async_get_last_motion_image(
+            self._serial, verification_code=self._verification_code
+        )
+
+    async def _async_grab_live(self) -> bytes | None:
+        """Grab one live frame - a full cloud session that wakes a battery camera."""
         api = self._entry.runtime_data.api
         camera = next(
             (
@@ -249,10 +283,10 @@ class EzvizStreamCamera(Camera):
         )
         if camera is None:
             _LOGGER.warning("Camera %s not found on the account", self._serial)
-            return
+            return None
 
         async with self._entry.runtime_data.snapshot_semaphore:
-            jpeg = await grab_jpeg(
+            return await grab_jpeg(
                 camera,
                 api.async_get_vtdu_token,
                 get_ffmpeg_manager(self.hass).binary,
@@ -260,10 +294,4 @@ class EzvizStreamCamera(Camera):
                 verification_code=self._verification_code,
                 duration=_SNAPSHOT_TIMEOUT,
                 max_sessions=_SNAPSHOT_MAX_SESSIONS,
-            )
-        if jpeg is not None:
-            self._image = jpeg
-            self._image_at = time.monotonic()
-            await self.hass.async_add_executor_job(
-                _write_snapshot, self._snapshot_path, jpeg
             )

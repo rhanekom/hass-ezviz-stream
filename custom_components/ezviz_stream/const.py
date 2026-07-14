@@ -24,9 +24,25 @@ MAX_MAX_SNAPSHOTS: Final = 5
 CAMERA_SUBENTRY_TYPE: Final = "camera"
 CONF_SERIAL: Final = "serial"
 CONF_VERIFICATION_CODE: Final = "verification_code"
-# Poll this camera's thumbnail less often. Defaults on for battery cameras (slow to
-# wake, and each grab is a full cloud session), user-overridable in the subentry flow.
+# Deprecated boolean cadence flag (kept only so subentries created before the
+# explicit interval landed still map to a sensible TTL on read). Superseded by
+# CONF_SNAPSHOT_INTERVAL; no longer written by the config flow.
 CONF_SLOW_THUMBNAILS: Final = "slow_thumbnails"
+# How often a *viewed* thumbnail refreshes (cache TTL, seconds). Each refresh of a
+# non-motion thumbnail is a full cloud session that wakes a battery camera, so the
+# battery default is deliberately long; mains cameras can afford a short interval.
+# User-overridable per camera in the subentry flow's Advanced section.
+CONF_SNAPSHOT_INTERVAL: Final = "snapshot_interval"
+DEFAULT_SNAPSHOT_INTERVAL: Final = 30
+DEFAULT_SNAPSHOT_INTERVAL_BATTERY: Final = 600
+MIN_SNAPSHOT_INTERVAL: Final = 15
+MAX_SNAPSHOT_INTERVAL: Final = 21600  # 6 h - for battery cams woken very rarely
+# Use the last cloud motion/alarm image as the thumbnail instead of a live grab, so a
+# battery camera is never woken just to fill a tile (reference A.8.1). Defaults on for
+# battery cameras. The still-image payload may be encrypted (reference B.10.2).
+CONF_MOTION_THUMBNAIL: Final = "motion_thumbnail"
+# Marker prefix of an encrypted still image (alarm snapshot); see reference B.10.2.
+HIK_ENCRYPTION_HEADER: Final = b"hikencodepicture"
 # Which track to stream/snapshot: main (1, HD) or sub (2, lower-res, less bandwidth).
 CONF_STREAM: Final = "stream"
 MAIN_STREAM: Final = 1

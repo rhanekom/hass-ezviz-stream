@@ -126,3 +126,31 @@ async def test_get_vtdu_token_none_returned() -> None:
     await api.async_login("user@example.com", "pw", "Europe")
     with pytest.raises(CannotConnect):
         await api.async_get_vtdu_token()
+
+
+async def test_get_last_motion_image_plaintext() -> None:
+    """The latest alarm's picUrl is fetched and returned (no wake, unencrypted)."""
+    alarm = {"meta": {"code": 200}, "alarms": [{"picUrl": "https://oss.example/x.jpg"}]}
+    image_bytes = b"\xff\xd8 plain jpeg from the cloud"
+    session = _session({"users/login": _LOGIN_OK, "alarms/v2/advanced": alarm})
+
+    async def _get(url: str, **_kwargs: Any) -> MagicMock:
+        assert url == "https://oss.example/x.jpg"
+        resp = MagicMock()
+        resp.status = 200
+        resp.read = AsyncMock(return_value=image_bytes)
+        return resp
+
+    session.get = _get
+    api = EzvizCloudApi(session)
+    await api.async_login("user@example.com", "pw", "Europe")
+    assert await api.async_get_last_motion_image("SN1") == image_bytes
+
+
+async def test_get_last_motion_image_none_when_no_alarm() -> None:
+    """No alarm (or no image URL) yields None rather than an error."""
+    alarm = {"meta": {"code": 200}, "alarms": []}
+    session = _session({"users/login": _LOGIN_OK, "alarms/v2/advanced": alarm})
+    api = EzvizCloudApi(session)
+    await api.async_login("user@example.com", "pw", "Europe")
+    assert await api.async_get_last_motion_image("SN1") is None

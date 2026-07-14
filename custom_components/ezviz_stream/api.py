@@ -19,7 +19,8 @@ from typing import Any
 
 import aiohttp
 
-from .const import BATTERY_CAMERA_CATEGORY, REGION_API_CODES
+from .const import BATTERY_CAMERA_CATEGORY, HIK_ENCRYPTION_HEADER, REGION_API_CODES
+from .decrypt_image import StillImageDecryptError, decrypt_still_image
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +30,8 @@ _LOGIN_PATH = "/v3/users/login/v5"
 _PAGELIST_PATH = (
     "/v3/userdevices/v1/resources/pagelist?filter=VTM&groupId=-1&limit=50&offset=0"
 )
+# Most recent motion/alarm event (with its stored still image); limit=1 = latest.
+_ALARM_PATH = "/v3/alarms/v2/advanced?queryType=-1&limit=1&stype=-1&deviceSerials="
 
 # Desktop/Studio client persona - load-bearing: the mobile persona doesn't reliably
 # surface VTM routing data (doc/reference.md A.1/A.2).
@@ -116,6 +119,17 @@ def _headers(session_id: str | None = None) -> dict[str, str]:
     if session_id:
         hdrs["sessionId"] = session_id
     return hdrs
+
+
+def _first_image_url(value: Any) -> str | None:
+    """Return the first HTTP(S) URL from a picUrl-style value (may be ``;``-joined)."""
+    if not isinstance(value, str):
+        return None
+    for part in value.split(";"):
+        text = part.strip()
+        if text.startswith(("http://", "https://")):
+            return text
+    return None
 
 
 def _deep_find(obj: Any, key: str) -> Any:
@@ -220,6 +234,37 @@ class EzvizCloudApi:
             )
         return [cam for cam in cameras if cam.streamable]
 
+    async def async_get_last_motion_image(
+        self, serial: str, *, verification_code: str = ""
+    ) -> bytes | None:
+        """
+        Return the most recent motion/alarm still image for a camera, or None.
+
+        Fetched over plain HTTPS from the alarms API (reference A.8.1): no VTDU
+        session and no camera wake, so it is safe as a battery camera's thumbnail.
+        A payload wrapped in the ``hikencodepicture`` envelope is decrypted with the
+        verification code (reference B.10.2); a wrong code yields None.
+        """
+        if not self._session_id or not self._host:
+            msg = "not logged in"
+            raise EzvizStreamApiError(msg)
+        body = await self._get(f"{self._host}{_ALARM_PATH}{serial}")
+        if (body.get("meta") or {}).get("code") != _HTTP_OK:
+            return None
+        image_url = _first_image_url(
+            _deep_find(body, "picUrl") or _deep_find(body, "picURL")
+        )
+        if not image_url:
+            return None
+        data = await self._get_bytes(image_url)
+        if not data or HIK_ENCRYPTION_HEADER not in data:
+            return data
+        try:
+            return decrypt_still_image(data, verification_code)
+        except StillImageDecryptError:
+            _LOGGER.debug("Could not decrypt motion image (check verification code)")
+            return None
+
     async def async_get_vtdu_token(self) -> str:
         """Fetch a VTDU media token (needed per streaming session). Requires login."""
         if not self._session_id or not self._host:
@@ -265,6 +310,17 @@ class EzvizCloudApi:
 
     async def _get(self, url: str) -> dict[str, Any]:
         return await self._request("get", url)
+
+    async def _get_bytes(self, url: str) -> bytes | None:
+        """GET raw binary content (e.g. an alarm image); None on any failure."""
+        try:
+            async with asyncio.timeout(_REQUEST_TIMEOUT):
+                resp = await self._session.get(url, headers=_headers(self._session_id))
+                if resp.status != _HTTP_OK:
+                    return None
+                return await resp.read()
+        except TimeoutError, aiohttp.ClientError:
+            return None
 
     async def _request(
         self, method: str, url: str, *, data: dict[str, str] | None = None

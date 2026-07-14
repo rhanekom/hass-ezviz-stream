@@ -20,9 +20,10 @@ git history; this list is the feature-level summary.
   region, validated) then per-camera add, each with its own Image-Encryption
   verification code. Per-camera **reconfigure**, account **reauth**, and a **frame-grab
   validation** on save (retry / save-anyway soft block). Simple form with an
-  **Advanced** section (thumbnail cadence, main/sub stream; battery cams default to
-  the **sub stream** + slower thumbnails) and a **battery-drain warning**. Camera
-  entities link to the official `ezviz` device.
+  **Advanced** section (last-motion thumbnail, snapshot refresh interval, main/sub
+  stream; battery cams default to the **motion thumbnail** + **sub stream** + a long
+  interval) and a **battery-drain warning**. Account **options flow** tunes max
+  concurrent snapshot fetches. Camera entities link to the official `ezviz` device.
 - **Cloud protocol core (no runtime `pyezvizapi`).** Hand-rolled region login,
   device discovery, VTDU token, and the VTM/VTDU `ysproto` handshake; RTP/RFC-7798
   HEVC depacketizer; MPEG-PS transport; our own AES-ECB Image-Encryption decryptor
@@ -34,7 +35,10 @@ git history; this list is the feature-level summary.
   watched (battery-friendly). RTP-clock playback pacing keeps timing smooth. Both
   transports confirmed live in HA.
 - **Snapshots.** On-demand JPEG grab, cached (battery cams poll far less), and the
-  last good frame is retained across restarts so tiles never go blank.
+  last good frame is retained across restarts so tiles never go blank. Battery cams
+  default to the **last cloud motion image** as their thumbnail (fetched over HTTPS
+  from the alarms API, no camera wake; still-image `hikencodepicture` payloads
+  decrypted with the verification code), seeded once with a live grab if none exists.
 - **Tooling / CI.** `hassfest` + HACS validation green; duplicate-code pre-commit
   hook; account credentials stay in memory only (no secrets on disk).
 

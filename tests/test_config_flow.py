@@ -22,11 +22,14 @@ from custom_components.ezviz_stream.api import (
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_MAX_SNAPSHOTS,
+    CONF_MOTION_THUMBNAIL,
     CONF_REGION,
     CONF_SERIAL,
-    CONF_SLOW_THUMBNAILS,
+    CONF_SNAPSHOT_INTERVAL,
     CONF_STREAM,
     CONF_VERIFICATION_CODE,
+    DEFAULT_SNAPSHOT_INTERVAL,
+    DEFAULT_SNAPSHOT_INTERVAL_BATTERY,
     DOMAIN,
 )
 
@@ -147,7 +150,7 @@ async def test_account_already_configured(hass: HomeAssistant) -> None:
 
 # --- camera subentry flow --------------------------------------------------- #
 async def test_add_camera_subentry(hass: HomeAssistant) -> None:
-    """Adding a (non-battery) camera: pick it, set its code, slow refresh off."""
+    """Adding a (non-battery) camera: pick it, set its code, motion thumbnail off."""
     entry = _account_entry()
     entry.add_to_hass(hass)
 
@@ -174,15 +177,16 @@ async def test_add_camera_subentry(hass: HomeAssistant) -> None:
     assert result["data"] == {
         CONF_SERIAL: "SN1",
         CONF_VERIFICATION_CODE: "ABCDEF",
-        CONF_SLOW_THUMBNAILS: False,  # SN1 is an IPC (mains) cam
+        CONF_MOTION_THUMBNAIL: False,  # SN1 is an IPC (mains) cam
+        CONF_SNAPSHOT_INTERVAL: DEFAULT_SNAPSHOT_INTERVAL,  # mains default
         CONF_STREAM: 1,  # main stream by default
     }
 
 
-async def test_add_battery_camera_defaults_to_slow_thumbnails(
+async def test_add_battery_camera_defaults_to_motion_thumbnail(
     hass: HomeAssistant,
 ) -> None:
-    """A battery camera defaults the slow-thumbnail refresh on in the options step."""
+    """A battery camera defaults to the motion thumbnail + long refresh interval."""
     entry = _account_entry()
     entry.add_to_hass(hass)
 
@@ -202,7 +206,8 @@ async def test_add_battery_camera_defaults_to_slow_thumbnails(
         await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"][CONF_SLOW_THUMBNAILS] is True
+    assert result["data"][CONF_MOTION_THUMBNAIL] is True
+    assert result["data"][CONF_SNAPSHOT_INTERVAL] == DEFAULT_SNAPSHOT_INTERVAL_BATTERY
     assert result["data"][CONF_STREAM] == 2  # battery cams default to the sub stream
 
 
@@ -230,14 +235,15 @@ async def test_add_camera_aborts_when_all_added(hass: HomeAssistant) -> None:
 
 
 async def test_reconfigure_camera_subentry(hass: HomeAssistant) -> None:
-    """Reconfiguring a camera updates its code, thumbnail cadence and stream."""
+    """Reconfiguring a camera updates its code, thumbnail settings and stream."""
     entry = _account_entry(
         subentries=[
             ConfigSubentryData(
                 data={
                     CONF_SERIAL: "SN1",
                     CONF_VERIFICATION_CODE: "OLD",
-                    CONF_SLOW_THUMBNAILS: False,
+                    CONF_MOTION_THUMBNAIL: False,
+                    CONF_SNAPSHOT_INTERVAL: 30,
                     CONF_STREAM: 1,
                 },
                 subentry_type=CAMERA_SUBENTRY_TYPE,
@@ -258,7 +264,11 @@ async def test_reconfigure_camera_subentry(hass: HomeAssistant) -> None:
             result["flow_id"],
             {
                 CONF_VERIFICATION_CODE: "NEW",
-                "advanced": {CONF_SLOW_THUMBNAILS: True, CONF_STREAM: "2"},
+                "advanced": {
+                    CONF_MOTION_THUMBNAIL: True,
+                    CONF_SNAPSHOT_INTERVAL: 900,
+                    CONF_STREAM: "2",
+                },
             },
         )
         await hass.async_block_till_done()
@@ -268,7 +278,8 @@ async def test_reconfigure_camera_subentry(hass: HomeAssistant) -> None:
     assert entry.subentries[subentry_id].data == {
         CONF_SERIAL: "SN1",  # unchanged
         CONF_VERIFICATION_CODE: "NEW",
-        CONF_SLOW_THUMBNAILS: True,
+        CONF_MOTION_THUMBNAIL: True,
+        CONF_SNAPSHOT_INTERVAL: 900,
         CONF_STREAM: 2,  # switched to sub stream
     }
 
