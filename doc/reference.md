@@ -12,6 +12,12 @@ EZVIZ cloud protocol and public reverse-engineering of the wire format. It is a
 reference companion to `specification.md` (the build spec) - where the two
 overlap, the build spec's decisions win.
 
+> **This document covers the private mobile/desktop app API only** (the path this
+> integration uses). EZVIZ also publishes an official **Open Platform** developer
+> REST API (`/api/lapp/*`, appKey/appSecret, `ezopen://` streaming) - a *different*
+> surface. It is documented separately in [`open-platform.md`](open-platform.md),
+> which also validates the assumptions below against the official docs.
+
 > **Legend.** `<region>` = the routing code (e.g. `ieu`); serials, tokens,
 > passwords are always treated as secrets and never logged. All multi-byte binary
 > fields are **big-endian** unless stated otherwise.
