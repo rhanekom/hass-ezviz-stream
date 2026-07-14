@@ -122,7 +122,7 @@ async def test_snapshot_cached_within_ttl(hass: HomeAssistant) -> None:
         ]
     )
     entry = SimpleNamespace(
-        runtime_data=SimpleNamespace(api=api, stream_semaphore=asyncio.Semaphore(1))
+        runtime_data=SimpleNamespace(api=api, snapshot_semaphore=asyncio.Semaphore(1))
     )
     subentry = SimpleNamespace(
         data={CONF_SERIAL: "SN1", CONF_VERIFICATION_CODE: ""},
@@ -154,7 +154,7 @@ def test_slow_thumbnails_uses_longer_cache_ttl() -> None:
     """The slow-thumbnails flag lengthens the snapshot cache TTL."""
     entry = SimpleNamespace(
         runtime_data=SimpleNamespace(
-            api=AsyncMock(), stream_semaphore=asyncio.Semaphore(1)
+            api=AsyncMock(), snapshot_semaphore=asyncio.Semaphore(1)
         )
     )
 
@@ -180,7 +180,7 @@ async def test_snapshot_persisted_and_restored_across_restart(
         return_value=[EzvizCamera("SN1", "Front door", "IPC", 1, 1, streamable=True)]
     )
     entry = SimpleNamespace(
-        runtime_data=SimpleNamespace(api=api, stream_semaphore=asyncio.Semaphore(1))
+        runtime_data=SimpleNamespace(api=api, snapshot_semaphore=asyncio.Semaphore(1))
     )
     subentry = SimpleNamespace(
         data={CONF_SERIAL: "SN1", CONF_VERIFICATION_CODE: ""},
@@ -224,7 +224,7 @@ async def test_stream_source_and_registry_lifecycle(hass: HomeAssistant) -> None
             CONF_REGION: "Europe",
         },
         runtime_data=SimpleNamespace(
-            api=AsyncMock(), stream_semaphore=asyncio.Semaphore(1)
+            api=AsyncMock(), snapshot_semaphore=asyncio.Semaphore(1)
         ),
     )
     subentry = SimpleNamespace(

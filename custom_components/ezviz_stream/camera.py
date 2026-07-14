@@ -221,7 +221,7 @@ class EzvizStreamCamera(Camera):
                 _LOGGER.warning("Camera %s not found on the account", self._serial)
                 return self._image
 
-            async with self._entry.runtime_data.stream_semaphore:
+            async with self._entry.runtime_data.snapshot_semaphore:
                 jpeg = await grab_jpeg(
                     camera,
                     api.async_get_vtdu_token,

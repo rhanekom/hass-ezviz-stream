@@ -24,10 +24,11 @@ _VIEW_REGISTERED = "view_registered"
 
 # Cap concurrent snapshot grabs account-wide. A burst of them (a dashboard of camera
 # cards cold-loading) once overwhelmed EZVIZ's signalling with churn (result 5405),
-# not a hard cap - so a small count is fine. Raised 1 -> 2 to speed multi-camera
-# thumbnail fill; if the hard concurrency codes (5504/5546) appear (logged by
-# stream.open_stream), back this off. Live streams are one-per-camera and ungated.
-MAX_CONCURRENT_STREAMS = 2
+# not a hard cap - so a small count is fine. 2 is verified comfortable on a
+# multi-camera account (no 5504/5546); if those hard concurrency codes ever appear
+# (logged by stream.open_stream), back this off. This gates only snapshot grabs -
+# live streams are one cloud session per camera and ungated.
+MAX_CONCURRENT_SNAPSHOTS = 2
 
 
 @dataclass
@@ -35,7 +36,7 @@ class EzvizStreamData:
     """Runtime data stored on the config entry."""
 
     api: EzvizCloudApi
-    stream_semaphore: asyncio.Semaphore
+    snapshot_semaphore: asyncio.Semaphore
 
 
 type EzvizStreamConfigEntry = ConfigEntry[EzvizStreamData]
@@ -56,7 +57,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: EzvizStreamConfigEntry) 
         raise ConfigEntryNotReady(str(err)) from err
 
     entry.runtime_data = EzvizStreamData(
-        api=api, stream_semaphore=asyncio.Semaphore(MAX_CONCURRENT_STREAMS)
+        api=api, snapshot_semaphore=asyncio.Semaphore(MAX_CONCURRENT_SNAPSHOTS)
     )
     # Register the media view once per HA instance (serves every camera's stream).
     domain_data = hass.data.setdefault(DOMAIN, {})
