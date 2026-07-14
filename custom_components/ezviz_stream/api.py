@@ -15,7 +15,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 import aiohttp
 
@@ -27,6 +27,7 @@ _LOGGER = logging.getLogger(__name__)
 _REQUEST_TIMEOUT = 15
 _HTTP_OK = 200
 _NOT_LOGGED_IN = "not logged in"  # raised by control-plane calls before async_login
+_EPOCH_MS_THRESHOLD = 1e12  # values above this are epoch milliseconds, not seconds
 _LOGIN_PATH = "/v3/users/login/v5"
 _PAGELIST_PATH = (
     "/v3/userdevices/v1/resources/pagelist"
@@ -129,6 +130,27 @@ def _headers(session_id: str | None = None) -> dict[str, str]:
     if session_id:
         hdrs["sessionId"] = session_id
     return hdrs
+
+
+class MotionImage(NamedTuple):
+    """A motion/alarm still image and its event time (epoch seconds, 0 if unknown)."""
+
+    image: bytes
+    timestamp: float
+
+
+def _alarm_epoch(body: Any) -> float:
+    """Return the latest alarm's event time as epoch seconds (0.0 if absent)."""
+    raw = (
+        _deep_find(body, "alarmTime")
+        or _deep_find(body, "alarmStartTime")
+        or _deep_find(body, "startTime")
+    )
+    try:
+        seconds = float(raw)
+    except TypeError, ValueError:
+        return 0.0
+    return seconds / 1000 if seconds > _EPOCH_MS_THRESHOLD else seconds
 
 
 def _first_image_url(value: Any) -> str | None:
@@ -248,16 +270,17 @@ class EzvizCloudApi:
             )
         return [cam for cam in cameras if cam.streamable]
 
-    async def async_get_last_motion_image(
+    async def async_get_last_motion(
         self, serial: str, *, verification_code: str = ""
-    ) -> bytes | None:
+    ) -> MotionImage | None:
         """
-        Return the most recent motion/alarm still image for a camera, or None.
+        Return the most recent motion/alarm image and its event time, or None.
 
         Fetched over plain HTTPS from the alarms API (reference A.8.1): no VTDU
         session and no camera wake, so it is safe as a battery camera's thumbnail.
         A payload wrapped in the ``hikencodepicture`` envelope is decrypted with the
-        verification code (reference B.10.2); a wrong code yields None.
+        verification code (reference B.10.2); a wrong code yields None. The event time
+        is epoch seconds (0.0 if the alarm carried none).
         """
         if not self._session_id or not self._host:
             raise EzvizStreamApiError(_NOT_LOGGED_IN)
@@ -270,13 +293,24 @@ class EzvizCloudApi:
         if not image_url:
             return None
         data = await self._get_bytes(image_url)
-        if not data or HIK_ENCRYPTION_HEADER not in data:
-            return data
-        try:
-            return decrypt_still_image(data, verification_code)
-        except StillImageDecryptError:
-            _LOGGER.debug("Could not decrypt motion image (check verification code)")
+        if not data:
             return None
+        if HIK_ENCRYPTION_HEADER in data:
+            try:
+                data = decrypt_still_image(data, verification_code)
+            except StillImageDecryptError:
+                _LOGGER.debug("Could not decrypt motion image (check code)")
+                return None
+        return MotionImage(image=data, timestamp=_alarm_epoch(body))
+
+    async def async_get_last_motion_image(
+        self, serial: str, *, verification_code: str = ""
+    ) -> bytes | None:
+        """Return just the latest motion image (see :meth:`async_get_last_motion`)."""
+        motion = await self.async_get_last_motion(
+            serial, verification_code=verification_code
+        )
+        return motion.image if motion else None
 
     async def async_get_vtdu_token(self) -> str:
         """Fetch a VTDU media token (needed per streaming session). Requires login."""

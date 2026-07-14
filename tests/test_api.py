@@ -5,16 +5,24 @@ from __future__ import annotations
 import base64
 import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 
+from custom_components.ezviz_stream import api as api_module
 from custom_components.ezviz_stream.api import (
     CannotConnect,
     EzvizCloudApi,
+    EzvizStreamApiError,
     InvalidAuth,
+    InvalidRegion,
     MfaRequired,
+    _api_host,
+    _first_image_url,
+    _normalise_host,
 )
+from custom_components.ezviz_stream.decrypt_image import StillImageDecryptError
 
 # A sessionId shaped like a JWT whose payload carries the `s` (sign) claim.
 _SIGN = "SIGNVALUE"
@@ -180,3 +188,241 @@ async def test_get_last_motion_image_none_when_no_alarm() -> None:
     api = EzvizCloudApi(session)
     await api.async_login("user@example.com", "pw", "Europe")
     assert await api.async_get_last_motion_image("SN1") is None
+
+
+async def test_get_last_motion_returns_image_and_epoch_seconds() -> None:
+    """async_get_last_motion returns the image plus the event time in epoch seconds."""
+    alarm = {
+        "meta": {"code": 200},
+        "alarms": [{"picUrl": "https://oss.example/x.jpg", "alarmTime": 1700000000000}],
+    }
+    session = _session({"users/login": _LOGIN_OK, "alarms/v2/advanced": alarm})
+
+    async def _get(_url: str, **_kwargs: Any) -> MagicMock:
+        resp = MagicMock()
+        resp.status = 200
+        resp.read = AsyncMock(return_value=b"IMG")
+        return resp
+
+    session.get = _get
+    api = EzvizCloudApi(session)
+    await api.async_login("user@example.com", "pw", "Europe")
+    motion = await api.async_get_last_motion("SN1")
+    assert motion is not None
+    assert motion.image == b"IMG"
+    assert motion.timestamp == 1700000000.0  # epoch ms normalised to seconds
+
+
+# --- pure helpers ----------------------------------------------------------- #
+def test_api_host_unknown_region_raises() -> None:
+    with pytest.raises(InvalidRegion):
+        _api_host("Atlantis")
+
+
+def test_first_image_url_returns_none_for_non_urls() -> None:
+    assert _first_image_url(None) is None  # not a string
+    assert _first_image_url("ftp://x;just-text") is None  # no http(s) part
+    assert _first_image_url("nope;https://ok/img.jpg") == "https://ok/img.jpg"
+
+
+def test_normalise_host_handles_empty() -> None:
+    assert _normalise_host(None) is None
+    assert _normalise_host("") is None
+    assert _normalise_host("host") == "https://host"
+    assert _normalise_host("http://host") == "http://host"
+
+
+# --- login edges ------------------------------------------------------------ #
+async def test_login_unknown_region_raises() -> None:
+    api = EzvizCloudApi(_session({}))
+    with pytest.raises(InvalidRegion):
+        await api.async_login("user@example.com", "pw", "Atlantis")
+
+
+async def test_login_exhausts_region_redirects() -> None:
+    """Repeated region redirects run out of retries and surface CannotConnect."""
+    routes = {
+        "users/login": {
+            "meta": {"code": 1100},
+            "loginArea": {"apiDomain": "apiius.ezvizlife.com"},
+        }
+    }
+    api = EzvizCloudApi(_session(routes))
+    with pytest.raises(CannotConnect):
+        await api.async_login("user@example.com", "pw", "Europe")
+
+
+async def test_login_region_redirect_without_host_raises() -> None:
+    routes = {"users/login": {"meta": {"code": 1100}, "loginArea": {}}}
+    api = EzvizCloudApi(_session(routes))
+    with pytest.raises(CannotConnect):
+        await api.async_login("user@example.com", "pw", "Europe")
+
+
+async def test_login_success_without_session_id_raises() -> None:
+    routes = {"users/login": {"meta": {"code": 200}, "loginSession": {}}}
+    api = EzvizCloudApi(_session(routes))
+    with pytest.raises(CannotConnect):
+        await api.async_login("user@example.com", "pw", "Europe")
+
+
+# --- not-logged-in guards --------------------------------------------------- #
+async def test_get_cameras_requires_login() -> None:
+    api = EzvizCloudApi(_session({}))
+    with pytest.raises(EzvizStreamApiError):
+        await api.async_get_cameras()
+
+
+async def test_get_last_motion_image_requires_login() -> None:
+    api = EzvizCloudApi(_session({}))
+    with pytest.raises(EzvizStreamApiError):
+        await api.async_get_last_motion_image("SN1")
+
+
+async def test_get_vtdu_token_requires_login() -> None:
+    api = EzvizCloudApi(_session({}))
+    with pytest.raises(EzvizStreamApiError):
+        await api.async_get_vtdu_token()
+
+
+# --- camera discovery edges ------------------------------------------------- #
+async def test_get_cameras_skips_non_streamable_resources() -> None:
+    """Resources with no serial or a non-positive resourceType are ignored."""
+    pagelist = {
+        "resourceInfos": [
+            {"deviceSerial": "SNX", "resourceId": "R9", "resourceType": 0}
+        ],
+        "deviceInfos": [],
+        "VTM": {},
+        "STATUS": {},
+    }
+    api = EzvizCloudApi(_session({"users/login": _LOGIN_OK, "pagelist": pagelist}))
+    await api.async_login("user@example.com", "pw", "Europe")
+    assert await api.async_get_cameras() == []
+
+
+# --- motion image edges ----------------------------------------------------- #
+async def test_get_last_motion_image_none_when_meta_not_ok() -> None:
+    alarm = {"meta": {"code": 500}}
+    session = _session({"users/login": _LOGIN_OK, "alarms/v2/advanced": alarm})
+    api = EzvizCloudApi(session)
+    await api.async_login("user@example.com", "pw", "Europe")
+    assert await api.async_get_last_motion_image("SN1") is None
+
+
+def _alarm_session_with_get(status: int, data: bytes) -> MagicMock:
+    """A session whose alarm query yields one picUrl and whose GET returns ``data``."""
+    alarm = {"meta": {"code": 200}, "alarms": [{"picUrl": "https://oss.example/x.jpg"}]}
+    session = _session({"users/login": _LOGIN_OK, "alarms/v2/advanced": alarm})
+
+    async def _get(_url: str, **_kwargs: Any) -> MagicMock:
+        resp = MagicMock()
+        resp.status = status
+        resp.read = AsyncMock(return_value=data)
+        return resp
+
+    session.get = _get
+    return session
+
+
+async def test_get_last_motion_image_decrypts_encrypted_payload() -> None:
+    """An encrypted (hikencodepicture) image is decrypted with the code."""
+    encrypted = api_module.HIK_ENCRYPTION_HEADER + b"ciphertext"
+    api = EzvizCloudApi(_alarm_session_with_get(200, encrypted))
+    await api.async_login("user@example.com", "pw", "Europe")
+    with patch.object(api_module, "decrypt_still_image", return_value=b"PLAINJPEG"):
+        result = await api.async_get_last_motion_image(
+            "SN1", verification_code="123456"
+        )
+    assert result == b"PLAINJPEG"
+
+
+async def test_get_last_motion_image_none_on_decrypt_failure() -> None:
+    """A wrong verification code (decrypt raises) yields None, not an error."""
+    encrypted = api_module.HIK_ENCRYPTION_HEADER + b"ciphertext"
+    api = EzvizCloudApi(_alarm_session_with_get(200, encrypted))
+    await api.async_login("user@example.com", "pw", "Europe")
+    with patch.object(
+        api_module,
+        "decrypt_still_image",
+        side_effect=StillImageDecryptError("wrong code"),
+    ):
+        assert await api.async_get_last_motion_image("SN1") is None
+
+
+async def test_get_last_motion_image_none_when_download_not_ok() -> None:
+    api = EzvizCloudApi(_alarm_session_with_get(404, b""))
+    await api.async_login("user@example.com", "pw", "Europe")
+    assert await api.async_get_last_motion_image("SN1") is None
+
+
+async def test_get_last_motion_image_none_when_download_errors() -> None:
+    alarm = {"meta": {"code": 200}, "alarms": [{"picUrl": "https://oss.example/x.jpg"}]}
+    session = _session({"users/login": _LOGIN_OK, "alarms/v2/advanced": alarm})
+
+    async def _get(_url: str, **_kwargs: Any) -> MagicMock:
+        raise aiohttp.ClientError("network down")
+
+    session.get = _get
+    api = EzvizCloudApi(session)
+    await api.async_login("user@example.com", "pw", "Europe")
+    assert await api.async_get_last_motion_image("SN1") is None
+
+
+# --- vtdu token + auth addr ------------------------------------------------- #
+async def test_get_vtdu_token_rejects_undecodable_session_id() -> None:
+    """A session id whose JWT payload will not decode surfaces CannotConnect."""
+    login = {
+        "meta": {"code": 200},
+        "loginSession": {"sessionId": "aaa.bbb.ccc"},  # 'bbb' is not JSON
+        "loginArea": {"apiDomain": "apiieu.ezvizlife.com"},
+    }
+    routes = {"users/login": login, "server/info/get": {"authAddr": "euauth"}}
+    api = EzvizCloudApi(_session(routes))
+    await api.async_login("user@example.com", "pw", "Europe")
+    with pytest.raises(CannotConnect):
+        await api.async_get_vtdu_token()
+
+
+async def test_auth_addr_caches_and_falls_back_to_host_on_error() -> None:
+    """A failed server/info/get falls back to the API host, and the result caches."""
+    api = EzvizCloudApi(_session({}))
+    api._session_id = "sid"
+    api._host = "https://apiieu.ezvizlife.com"
+    with patch.object(
+        api, "_post", AsyncMock(side_effect=CannotConnect("boom"))
+    ) as post:
+        first = await api._async_auth_addr()
+        second = await api._async_auth_addr()  # cached: no second _post
+    assert first == "https://apiieu.ezvizlife.com"
+    assert second == first
+    post.assert_awaited_once()
+
+
+# --- request wrapping ------------------------------------------------------- #
+async def test_request_wraps_client_error() -> None:
+    session = MagicMock()
+    session.request = AsyncMock(side_effect=aiohttp.ClientError("net"))
+    api = EzvizCloudApi(session)
+    with pytest.raises(CannotConnect):
+        await api._get("https://x")
+
+
+async def test_request_wraps_non_json_body() -> None:
+    resp = MagicMock()
+    resp.json = AsyncMock(side_effect=ValueError("not json"))
+    session = MagicMock()
+    session.request = AsyncMock(return_value=resp)
+    api = EzvizCloudApi(session)
+    with pytest.raises(CannotConnect):
+        await api._get("https://x")
+
+
+async def test_request_rejects_non_dict_payload() -> None:
+    resp = MagicMock()
+    resp.json = AsyncMock(return_value=["not", "a", "dict"])
+    session = MagicMock()
+    session.request = AsyncMock(return_value=resp)
+    api = EzvizCloudApi(session)
+    with pytest.raises(CannotConnect):
+        await api._get("https://x")

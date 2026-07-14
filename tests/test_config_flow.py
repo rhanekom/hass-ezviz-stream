@@ -5,10 +5,14 @@ from __future__ import annotations
 import contextlib
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from homeassistant.config_entries import SOURCE_USER, ConfigSubentryData
+from homeassistant.config_entries import (
+    SOURCE_USER,
+    ConfigEntryState,
+    ConfigSubentryData,
+)
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -17,7 +21,12 @@ from custom_components.ezviz_stream.api import (
     CannotConnect,
     EzvizCamera,
     InvalidAuth,
+    InvalidRegion,
     MfaRequired,
+)
+from custom_components.ezviz_stream.config_flow import (
+    CameraSubentryFlowHandler,
+    _stored_interval,
 )
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
@@ -26,7 +35,9 @@ from custom_components.ezviz_stream.const import (
     CONF_MAX_SNAPSHOTS,
     CONF_REGION,
     CONF_SERIAL,
+    CONF_SLOW_THUMBNAILS,
     CONF_SNAPSHOT_INTERVAL,
+    CONF_STATIC_ANCHOR,
     CONF_STREAM,
     CONF_THUMBNAIL_MODE,
     CONF_VERIFICATION_CODE,
@@ -35,6 +46,7 @@ from custom_components.ezviz_stream.const import (
     DOMAIN,
     THUMBNAIL_INTERVAL,
     THUMBNAIL_MOTION,
+    THUMBNAIL_STATIC_MOTION,
 )
 from custom_components.ezviz_stream.decrypt_image import password_hash
 
@@ -63,6 +75,34 @@ def _patch_api(
     )
     return patch(
         "custom_components.ezviz_stream.config_flow.EzvizCloudApi", return_value=api
+    )
+
+
+def _patch_api_raising(exc: type[Exception]) -> Any:
+    """Patch EzvizCloudApi so login works but camera discovery raises ``exc``."""
+    api = AsyncMock()
+    api.async_login = AsyncMock(return_value=None)
+    api.async_get_cameras = AsyncMock(side_effect=exc)
+    return patch(
+        "custom_components.ezviz_stream.config_flow.EzvizCloudApi", return_value=api
+    )
+
+
+def _sn1_subentry() -> ConfigSubentryData:
+    """A minimal reconfigurable subentry for the mains camera SN1."""
+    return ConfigSubentryData(
+        data={
+            CONF_SERIAL: "SN1",
+            CONF_VERIFICATION_CODE: "OLD",
+            CONF_THUMBNAIL_MODE: THUMBNAIL_INTERVAL,
+            CONF_SNAPSHOT_INTERVAL: 30,
+            CONF_STREAM: 1,
+            CONF_IS_BATTERY: False,
+            CONF_IS_ENCRYPTED: False,
+        },
+        subentry_type=CAMERA_SUBENTRY_TYPE,
+        title="Front door",
+        unique_id="SN1",
     )
 
 
@@ -343,6 +383,31 @@ async def test_encrypted_camera_requires_and_validates_code(
     assert result["data"][CONF_VERIFICATION_CODE] == "ABCDEF"
 
 
+async def test_static_motion_mode_records_an_anchor(hass: HomeAssistant) -> None:
+    """Selecting 'static, then newer motion' stores a re-anchor timestamp on save."""
+    entry = _account_entry()
+    entry.add_to_hass(hass)
+    with _patch_api(), _patch_frame_grab(ok=True):
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, CAMERA_SUBENTRY_TYPE), context={"source": SOURCE_USER}
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {CONF_SERIAL: "SN1"}
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                CONF_VERIFICATION_CODE: "",
+                "advanced": {CONF_THUMBNAIL_MODE: THUMBNAIL_STATIC_MOTION},
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_THUMBNAIL_MODE] == THUMBNAIL_STATIC_MOTION
+    assert result["data"][CONF_STATIC_ANCHOR] > 0  # anchored to "now"
+
+
 async def test_unencrypted_camera_hides_verification_code(
     hass: HomeAssistant,
 ) -> None:
@@ -486,3 +551,245 @@ async def test_options_flow_sets_max_snapshots(hass: HomeAssistant) -> None:
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_MAX_SNAPSHOTS] == 3
     assert isinstance(entry.options[CONF_MAX_SNAPSHOTS], int)
+
+
+# --- account/reauth extra error branches ------------------------------------ #
+async def test_account_step_invalid_region(hass: HomeAssistant) -> None:
+    """An unknown region reports against the region field, not base."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    with _patch_api(login=AsyncMock(side_effect=InvalidRegion)):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], _ACCOUNT
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_REGION: "invalid_region"}
+
+
+async def test_account_step_unknown_error(hass: HomeAssistant) -> None:
+    """An unexpected exception during login surfaces as the generic 'unknown' error."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    with _patch_api(login=AsyncMock(side_effect=RuntimeError("boom"))):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], _ACCOUNT
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "unknown"}
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (MfaRequired, "mfa_not_supported"),
+        (CannotConnect, "cannot_connect"),
+        (RuntimeError, "unknown"),
+    ],
+)
+async def test_reauth_step_errors(
+    hass: HomeAssistant, error: type[Exception], expected: str
+) -> None:
+    """Reauth surfaces MFA/connectivity/unexpected failures as form errors."""
+    entry = _account_entry()
+    entry.add_to_hass(hass)
+    result = await entry.start_reauth_flow(hass)
+    with _patch_api(login=AsyncMock(side_effect=error)):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_PASSWORD: "wrong"}
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": expected}
+
+
+# --- subentry add: account errors abort ------------------------------------- #
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (CannotConnect, "cannot_connect"),
+        (InvalidAuth, "invalid_auth"),
+        (MfaRequired, "invalid_auth"),
+    ],
+)
+async def test_add_camera_aborts_on_account_error(
+    hass: HomeAssistant, error: type[Exception], reason: str
+) -> None:
+    """If the account can't be reached to list cameras, adding aborts cleanly."""
+    entry = _account_entry()
+    entry.add_to_hass(hass)
+    with _patch_api_raising(error):
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, CAMERA_SUBENTRY_TYPE), context={"source": SOURCE_USER}
+        )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == reason
+
+
+# --- reconfigure branches --------------------------------------------------- #
+async def test_reconfigure_encrypted_requires_code(hass: HomeAssistant) -> None:
+    """Reconfiguring an encrypted camera with a blank code re-shows the form."""
+    entry = _account_entry(
+        subentries=[
+            ConfigSubentryData(
+                data={
+                    CONF_SERIAL: "SNE",
+                    CONF_VERIFICATION_CODE: "OLD",
+                    CONF_THUMBNAIL_MODE: THUMBNAIL_INTERVAL,
+                    CONF_SNAPSHOT_INTERVAL: 30,
+                    CONF_STREAM: 1,
+                },
+                subentry_type=CAMERA_SUBENTRY_TYPE,
+                title="Enc cam",
+                unique_id="SNE",
+            )
+        ]
+    )
+    entry.add_to_hass(hass)
+    subentry_id = next(iter(entry.subentries))
+    enc = EzvizCamera(
+        "SNE",
+        "Enc cam",
+        "IPC",
+        1,
+        1,
+        streamable=True,
+        is_encrypted=True,
+        encrypt_pwd_hash=password_hash("ABCDEF"),
+    )
+    with _patch_api(cameras=[enc]), _patch_frame_grab(ok=True):
+        result = await entry.start_subentry_reconfigure_flow(hass, subentry_id)
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                CONF_VERIFICATION_CODE: "",
+                "advanced": {
+                    CONF_THUMBNAIL_MODE: THUMBNAIL_INTERVAL,
+                    CONF_SNAPSHOT_INTERVAL: 30,
+                    CONF_STREAM: "1",
+                },
+            },
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_VERIFICATION_CODE: "code_required"}
+
+
+async def test_reconfigure_frame_check_fails_then_save_anyway(
+    hass: HomeAssistant,
+) -> None:
+    """A failed reconfigure frame check saves the edited subentry via save-anyway."""
+    entry = _account_entry(subentries=[_sn1_subentry()])
+    entry.add_to_hass(hass)
+    subentry_id = next(iter(entry.subentries))
+
+    with _patch_api(), _patch_frame_grab(ok=False):
+        result = await entry.start_subentry_reconfigure_flow(hass, subentry_id)
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                CONF_VERIFICATION_CODE: "NEW",
+                "advanced": {
+                    CONF_THUMBNAIL_MODE: THUMBNAIL_MOTION,
+                    CONF_SNAPSHOT_INTERVAL: 900,
+                    CONF_STREAM: "2",
+                },
+            },
+        )
+        assert result["type"] is FlowResultType.MENU
+        assert result["step_id"] == "verify_failed"
+
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {"next_step_id": "save_anyway"}
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.subentries[subentry_id].data[CONF_VERIFICATION_CODE] == "NEW"
+
+
+async def test_reconfigure_frame_check_retry_reopens_form(hass: HomeAssistant) -> None:
+    """Choosing retry after a failed reconfigure check re-opens the reconfigure form."""
+    entry = _account_entry(subentries=[_sn1_subentry()])
+    entry.add_to_hass(hass)
+    subentry_id = next(iter(entry.subentries))
+
+    with _patch_api(), _patch_frame_grab(ok=False):
+        result = await entry.start_subentry_reconfigure_flow(hass, subentry_id)
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                CONF_VERIFICATION_CODE: "NEW",
+                "advanced": {
+                    CONF_THUMBNAIL_MODE: THUMBNAIL_MOTION,
+                    CONF_SNAPSHOT_INTERVAL: 900,
+                    CONF_STREAM: "2",
+                },
+            },
+        )
+        assert result["step_id"] == "verify_failed"
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {"next_step_id": "retry"}
+        )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure"
+
+
+async def test_reconfigure_falls_back_when_account_unreachable(
+    hass: HomeAssistant,
+) -> None:
+    """If the account is unreachable, reconfigure still opens using stored data."""
+    entry = _account_entry(subentries=[_sn1_subentry()])
+    entry.add_to_hass(hass)
+    subentry_id = next(iter(entry.subentries))
+
+    with _patch_api_raising(CannotConnect):
+        result = await entry.start_subentry_reconfigure_flow(hass, subentry_id)
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure"
+
+
+# --- _stored_interval, _async_frame_ok, _async_api (unit) ------------------- #
+def test_stored_interval_prefers_explicit_then_legacy_then_default() -> None:
+    assert _stored_interval({CONF_SNAPSHOT_INTERVAL: 45}) == 45
+    assert (
+        _stored_interval({CONF_SLOW_THUMBNAILS: True})
+        == DEFAULT_SNAPSHOT_INTERVAL_BATTERY
+    )
+    assert _stored_interval({}) == DEFAULT_SNAPSHOT_INTERVAL
+
+
+async def test_frame_ok_false_when_camera_missing() -> None:
+    """The frame check fails softly when the camera is not on the account."""
+    handler = CameraSubentryFlowHandler()
+    handler._get_entry = MagicMock(return_value=MagicMock())
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(return_value=[])
+    with patch.object(handler, "_async_api", AsyncMock(return_value=api)):
+        ok = await handler._async_frame_ok(
+            {CONF_SERIAL: "SN1", CONF_STREAM: 1, CONF_VERIFICATION_CODE: ""}
+        )
+    assert ok is False
+
+
+async def test_frame_ok_false_on_account_error() -> None:
+    """The frame check fails softly when the account cannot be reached."""
+    handler = CameraSubentryFlowHandler()
+    handler._get_entry = MagicMock(return_value=MagicMock())
+    with patch.object(handler, "_async_api", AsyncMock(side_effect=CannotConnect)):
+        ok = await handler._async_frame_ok(
+            {CONF_SERIAL: "SN1", CONF_STREAM: 1, CONF_VERIFICATION_CODE: ""}
+        )
+    assert ok is False
+
+
+async def test_async_api_reuses_loaded_runtime_data() -> None:
+    """A loaded entry hands back its live API client instead of logging in again."""
+    handler = CameraSubentryFlowHandler()
+    sentinel = object()
+    entry = MagicMock()
+    entry.state = ConfigEntryState.LOADED
+    entry.runtime_data = SimpleNamespace(api=sentinel)
+    assert await handler._async_api(entry) is sentinel

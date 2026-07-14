@@ -37,6 +37,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
+from homeassistant.util import dt as dt_util
 
 from .api import (
     CannotConnect,
@@ -56,6 +57,7 @@ from .const import (
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
     CONF_SNAPSHOT_INTERVAL,
+    CONF_STATIC_ANCHOR,
     CONF_STREAM,
     CONF_THUMBNAIL_MODE,
     CONF_VERIFICATION_CODE,
@@ -74,6 +76,7 @@ from .const import (
     THUMBNAIL_INTERVAL,
     THUMBNAIL_MOTION,
     THUMBNAIL_STATIC,
+    THUMBNAIL_STATIC_MOTION,
 )
 from .decrypt_image import password_hash
 from .stream import grab_jpeg
@@ -138,6 +141,10 @@ def _camera_options_schema(
                             SelectOptionDict(
                                 value=THUMBNAIL_STATIC,
                                 label="Static image (captured once)",
+                            ),
+                            SelectOptionDict(
+                                value=THUMBNAIL_STATIC_MOTION,
+                                label="Static, then newer motion images",
                             ),
                         ],
                         mode=SelectSelectorMode.DROPDOWN,
@@ -217,6 +224,10 @@ def _camera_subentry_data(
         data[CONF_IS_BATTERY] = is_battery
     if is_encrypted is not None:
         data[CONF_IS_ENCRYPTED] = is_encrypted
+    if data[CONF_THUMBNAIL_MODE] == THUMBNAIL_STATIC_MOTION:
+        # Re-anchor to now on every save, so a save dismisses any current alarm image
+        # and only motion newer than this moment shows.
+        data[CONF_STATIC_ANCHOR] = dt_util.utcnow().timestamp()
     return data
 
 

@@ -45,13 +45,21 @@ DEFAULT_SNAPSHOT_INTERVAL_BATTERY: Final = 600
 MIN_SNAPSHOT_INTERVAL: Final = 15
 MAX_SNAPSHOT_INTERVAL: Final = 21600  # 6 h - for battery cams woken very rarely
 # How the camera tile is filled. Superseded the CONF_MOTION_THUMBNAIL boolean:
-#   interval - a live snapshot refreshed every CONF_SNAPSHOT_INTERVAL (wakes battery
-#              cams); motion - the latest cloud motion image, no wake (reference
-#              A.8.1); static - grabbed once then frozen.
+#   interval      - a live snapshot refreshed every CONF_SNAPSHOT_INTERVAL (wakes
+#                   battery cams);
+#   motion        - the latest cloud motion image, no wake (reference A.8.1);
+#   static        - grabbed once then frozen;
+#   static_motion - a static baseline, replaced by a motion image only when the event
+#                   is newer than CONF_STATIC_ANCHOR (re-set on each save).
 CONF_THUMBNAIL_MODE: Final = "thumbnail_mode"
 THUMBNAIL_INTERVAL: Final = "interval"
 THUMBNAIL_MOTION: Final = "motion"
 THUMBNAIL_STATIC: Final = "static"
+THUMBNAIL_STATIC_MOTION: Final = "static_motion"
+# Epoch-seconds anchor for THUMBNAIL_STATIC_MOTION: motion images older than this are
+# suppressed. Set to "now" on every save, so reconfiguring dismisses a stale/unwanted
+# alarm image while still letting newer events through.
+CONF_STATIC_ANCHOR: Final = "static_anchor"
 # Deprecated boolean (True -> motion, False -> interval); read only for subentries
 # created before CONF_THUMBNAIL_MODE. No longer written by the config flow.
 CONF_MOTION_THUMBNAIL: Final = "motion_thumbnail"

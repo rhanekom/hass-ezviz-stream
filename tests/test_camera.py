@@ -14,7 +14,7 @@ from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.ezviz_stream import async_remove_config_entry_device
-from custom_components.ezviz_stream.api import EzvizCamera
+from custom_components.ezviz_stream.api import EzvizCamera, MotionImage
 from custom_components.ezviz_stream.camera import EzvizStreamCamera
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
@@ -23,12 +23,14 @@ from custom_components.ezviz_stream.const import (
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
     CONF_SNAPSHOT_INTERVAL,
+    CONF_STATIC_ANCHOR,
     CONF_THUMBNAIL_MODE,
     CONF_VERIFICATION_CODE,
     DOMAIN,
     OFFICIAL_EZVIZ_DOMAIN,
     THUMBNAIL_MOTION,
     THUMBNAIL_STATIC,
+    THUMBNAIL_STATIC_MOTION,
 )
 from custom_components.ezviz_stream.stream_view import DATA_STREAMS
 
@@ -449,6 +451,50 @@ async def test_static_thumbnail_grabbed_once_then_frozen(
     assert first == b"STATIC" * 100
     assert second == first
     grab.assert_awaited_once()  # captured once, never refreshed
+
+
+def _static_motion_camera(
+    hass: HomeAssistant, motion: MotionImage
+) -> EzvizStreamCamera:
+    """A static_motion camera (anchor 1000) with a pre-captured baseline."""
+    api = AsyncMock()
+    api.async_get_last_motion = AsyncMock(return_value=motion)
+    entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(api=api, snapshot_semaphore=asyncio.Semaphore(1))
+    )
+    subentry = SimpleNamespace(
+        data={
+            CONF_SERIAL: "SN1",
+            CONF_VERIFICATION_CODE: "",
+            CONF_THUMBNAIL_MODE: THUMBNAIL_STATIC_MOTION,
+            CONF_STATIC_ANCHOR: 1000.0,
+        },
+        title="Cam",
+        subentry_id="x",
+    )
+    camera = EzvizStreamCamera(entry, subentry)
+    camera.hass = hass
+    camera._static_image = b"STATIC" * 100  # baseline already captured
+    return camera
+
+
+async def test_static_then_motion_shows_newer_alarm(hass: HomeAssistant) -> None:
+    """A motion event newer than the anchor replaces the static baseline (no wake)."""
+    camera = _static_motion_camera(hass, MotionImage(b"ALARM" * 100, 2000.0))
+    with patch("custom_components.ezviz_stream.camera.grab_jpeg", AsyncMock()) as grab:
+        image = await camera.async_camera_image()
+    assert image == b"ALARM" * 100
+    grab.assert_not_called()  # newer alarm shown from the cloud, camera not woken
+
+
+async def test_static_then_motion_keeps_static_when_alarm_older(
+    hass: HomeAssistant,
+) -> None:
+    """An event at/older than the anchor is suppressed; the static baseline shows."""
+    camera = _static_motion_camera(hass, MotionImage(b"OLD" * 100, 500.0))
+    with patch("custom_components.ezviz_stream.camera.grab_jpeg", AsyncMock()):
+        image = await camera.async_camera_image()
+    assert image == b"STATIC" * 100
 
 
 async def test_snapshot_persisted_and_restored_across_restart(

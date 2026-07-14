@@ -22,6 +22,7 @@ from .const import (
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
     CONF_SNAPSHOT_INTERVAL,
+    CONF_STATIC_ANCHOR,
     CONF_STREAM,
     CONF_THUMBNAIL_MODE,
     CONF_VERIFICATION_CODE,
@@ -33,6 +34,7 @@ from .const import (
     THUMBNAIL_INTERVAL,
     THUMBNAIL_MOTION,
     THUMBNAIL_STATIC,
+    THUMBNAIL_STATIC_MOTION,
 )
 from .stream import grab_jpeg
 from .stream_view import register_stream, unregister_stream
@@ -58,6 +60,7 @@ if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
     from . import EzvizStreamConfigEntry
+    from .api import MotionImage
 
 
 def _resolve_interval(data: dict[str, object]) -> float:
@@ -132,6 +135,9 @@ class EzvizStreamCamera(Camera):
         self._stream_index: int = subentry.data.get(CONF_STREAM, DEFAULT_STREAM)
         # None until known (cameras added before this was recorded resolve it once).
         self._is_battery: bool | None = subentry.data.get(CONF_IS_BATTERY)
+        # static_motion: suppress motion images at/older than this epoch-seconds anchor.
+        self._static_anchor: float = float(subentry.data.get(CONF_STATIC_ANCHOR) or 0.0)
+        self._static_image: bytes | None = None  # the frozen baseline for static_motion
         self._attr_unique_id = self._serial
         self._image: bytes | None = None  # last decoded frame (snapshot cache)
         self._image_at = 0.0
@@ -188,6 +194,10 @@ class EzvizStreamCamera(Camera):
         )
         if restored is not None and self._image is None:
             self._image = restored
+        # For static_motion the persisted frame is the static baseline (alarm images
+        # are never written to disk), so keep it available to fall back to.
+        if restored is not None and self._thumbnail_mode == THUMBNAIL_STATIC_MOTION:
+            self._static_image = restored
         # Cameras added before is_battery was recorded resolve it once, off the setup
         # path (a single cloud control-plane call - it does not wake the camera).
         if self._is_battery is None:
@@ -289,6 +299,9 @@ class EzvizStreamCamera(Camera):
 
     async def _async_grab_into_cache(self) -> None:
         """Refresh the in-memory + on-disk cache with a new frame (holds the lock)."""
+        if self._thumbnail_mode == THUMBNAIL_STATIC_MOTION:
+            await self._async_static_then_motion()
+            return
         if self._thumbnail_mode == THUMBNAIL_MOTION:
             jpeg = await self._async_fetch_motion_image()
             # If the motion image is blank and nothing is cached yet, seed the tile
@@ -299,10 +312,35 @@ class EzvizStreamCamera(Camera):
             # interval + static both grab a live frame; static just never
             # revalidates afterwards (its cache TTL is infinite).
             jpeg = await self._async_grab_live()
+        await self._store_frame(jpeg, persist=True)
 
-        if jpeg is not None:
-            self._image = jpeg
-            self._image_at = time.monotonic()
+    async def _async_static_then_motion(self) -> None:
+        """
+        Serve a static baseline, replaced by a motion image newer than the anchor.
+
+        The baseline is grabbed once and persisted (its own frame on disk); alarm
+        images are shown from memory only, so they never overwrite the baseline and a
+        re-anchor (a config-flow save) cleanly falls back to the clean static frame.
+        """
+        if self._static_image is None:
+            self._static_image = await self._async_grab_live()
+            if self._static_image is not None:
+                await self.hass.async_add_executor_job(
+                    _write_snapshot, self._snapshot_path, self._static_image
+                )
+        motion = await self._async_fetch_motion_event()
+        if motion is not None and motion.timestamp > self._static_anchor:
+            await self._store_frame(motion.image, persist=False)  # newer alarm
+        elif self._static_image is not None:
+            await self._store_frame(self._static_image, persist=False)  # baseline
+
+    async def _store_frame(self, jpeg: bytes | None, *, persist: bool) -> None:
+        """Update the in-memory cache with a frame, optionally persisting it to disk."""
+        if jpeg is None:
+            return
+        self._image = jpeg
+        self._image_at = time.monotonic()
+        if persist:
             await self.hass.async_add_executor_job(
                 _write_snapshot, self._snapshot_path, jpeg
             )
@@ -311,6 +349,13 @@ class EzvizStreamCamera(Camera):
         """Fetch the last cloud motion image for the thumbnail (no camera wake)."""
         api = self._entry.runtime_data.api
         return await api.async_get_last_motion_image(
+            self._serial, verification_code=self._verification_code
+        )
+
+    async def _async_fetch_motion_event(self) -> MotionImage | None:
+        """Fetch the last cloud motion image with its event time (no camera wake)."""
+        api = self._entry.runtime_data.api
+        return await api.async_get_last_motion(
             self._serial, verification_code=self._verification_code
         )
 
