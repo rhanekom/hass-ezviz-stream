@@ -12,12 +12,15 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import CannotConnect, EzvizCloudApi, InvalidAuth, MfaRequired
-from .const import CONF_REGION
+from .const import CONF_REGION, DOMAIN
+from .stream_view import EzvizStreamMediaView
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 PLATFORMS: list[Platform] = [Platform.CAMERA]
+
+_VIEW_REGISTERED = "view_registered"
 
 # EZVIZ rejects a burst of concurrent VTDU sessions (result 5405/5452), which a
 # dashboard of camera cards would trigger. Serialise streaming account-wide.
@@ -52,6 +55,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: EzvizStreamConfigEntry) 
     entry.runtime_data = EzvizStreamData(
         api=api, stream_semaphore=asyncio.Semaphore(MAX_CONCURRENT_STREAMS)
     )
+    # Register the media view once per HA instance (serves every camera's stream).
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if "http" in hass.config.components and not domain_data.get(_VIEW_REGISTERED):
+        hass.http.register_view(EzvizStreamMediaView(hass))
+        domain_data[_VIEW_REGISTERED] = True
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     # Reload when the entry changes so cameras added as subentries after setup get
     # their entities created (adding a subentry updates the entry -> fires this).

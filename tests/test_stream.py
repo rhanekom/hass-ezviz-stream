@@ -8,6 +8,7 @@ here with a plain ``asyncio.StreamReader``.
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import Mock, patch
 
 from custom_components.ezviz_stream import stream, ysproto
 
@@ -39,3 +40,22 @@ async def test_frame_reader_eof_sets_closed() -> None:
     loop = asyncio.get_running_loop()
     assert await frame_reader.next_frame(loop.time() + 1) is None
     assert frame_reader.closed
+
+
+async def test_stream_annexb_writes_iter_annexb_chunks() -> None:
+    """stream_annexb (the CLI producer wrapper) writes+flushes each yielded chunk."""
+
+    async def fake_iter(*_args: object, **_kwargs: object):  # noqa: ANN202
+        yield b"aa"
+        yield b"bb"
+
+    written: list[bytes] = []
+    out = Mock()
+    out.write = written.append
+    out.flush = Mock()
+
+    with patch.object(stream, "iter_annexb", fake_iter):
+        await stream.stream_annexb(Mock(), Mock(), out, stream=1)
+
+    assert b"".join(written) == b"aabb"
+    assert out.flush.call_count == 2  # flushed after each chunk (live, low-latency)

@@ -37,7 +37,7 @@ from .ysproto import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from typing import IO
 
     from .api import EzvizCamera
@@ -280,20 +280,19 @@ async def grab_jpeg(  # noqa: PLR0913 - a session needs camera, token, ffmpeg + 
     return None
 
 
-async def stream_annexb(
+async def iter_annexb(
     camera: EzvizCamera,
     token_factory: Callable[[], Awaitable[str]],
-    out: IO[bytes],
     *,
     stream: int,
-) -> None:
+) -> AsyncIterator[bytes]:
     """
-    Continuously write Annex-B HEVC to ``out``, reconnecting across the drop.
+    Yield Annex-B HEVC chunks continuously, reconnecting across the ~27 s drop.
 
-    For RTP/HEVC cameras (battery cams) only - go2rtc reads the H.265 bitstream from
-    the producer's stdout directly. Runs until cancelled (the process is stopped by
-    go2rtc when no client is watching). MPEG-PS (encrypted IPC) needs continuous
-    decryption + a remux and is handled separately (C.2b).
+    For RTP/HEVC cameras (battery cams) only. Runs until the consumer stops iterating
+    (the driving task is cancelled when no client is watching - battery-friendly).
+    MPEG-PS (encrypted IPC) needs continuous decryption + a remux and is handled
+    separately (C.2b). ``token_factory`` yields a fresh VTDU token per reconnect.
     """
     while True:
         try:
@@ -325,10 +324,28 @@ async def stream_annexb(
                 if detect_transport(body) == "rtp":
                     chunk = depacketizer.push(body)
                     if chunk:
-                        out.write(chunk)
-                        out.flush()
+                        yield chunk
         finally:
             writer.close()
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
         await asyncio.sleep(_RETRY_BACKOFF)
+
+
+async def stream_annexb(
+    camera: EzvizCamera,
+    token_factory: Callable[[], Awaitable[str]],
+    out: IO[bytes],
+    *,
+    stream: int,
+) -> None:
+    """
+    Write the continuous Annex-B HEVC stream to ``out`` (blocking file-like).
+
+    Thin wrapper over :func:`iter_annexb` for the standalone CLI producer
+    (``producer.py``); the integration itself consumes ``iter_annexb`` in-process via
+    :mod:`broadcast`. Runs until cancelled.
+    """
+    async for chunk in iter_annexb(camera, token_factory, stream=stream):
+        out.write(chunk)
+        out.flush()

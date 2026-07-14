@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import time
 from typing import TYPE_CHECKING
 
-from homeassistant.components.camera import Camera
+from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.components.ffmpeg import get_ffmpeg_manager
 from homeassistant.helpers.device_registry import DeviceInfo
 
+from .broadcast import CameraBroadcast, mpegts_source
 from .const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_SERIAL,
@@ -19,6 +21,7 @@ from .const import (
     OFFICIAL_EZVIZ_DOMAIN,
 )
 from .stream import grab_jpeg
+from .stream_view import register_stream, unregister_stream
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +35,8 @@ _MAIN_STREAM = 1
 _SNAPSHOT_CACHE_TTL = 30.0
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from homeassistant.config_entries import ConfigSubentry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -59,6 +64,7 @@ class EzvizStreamCamera(Camera):
 
     _attr_has_entity_name = True
     _attr_name = None  # the camera is its own device; use the device name
+    _attr_supported_features = CameraEntityFeature.STREAM
 
     def __init__(self, entry: EzvizStreamConfigEntry, subentry: ConfigSubentry) -> None:
         """Initialise the camera from its account entry and camera subentry."""
@@ -66,10 +72,15 @@ class EzvizStreamCamera(Camera):
         self._entry = entry
         self._serial: str = subentry.data[CONF_SERIAL]
         self._verification_code: str = subentry.data.get(CONF_VERIFICATION_CODE, "")
+        self._stream_index: int = _MAIN_STREAM
         self._attr_unique_id = self._serial
         self._image: bytes | None = None  # last decoded frame (snapshot cache)
         self._image_at = 0.0
         self._image_lock = asyncio.Lock()  # dedupe concurrent grabs for this camera
+        # Live serving: a random per-camera token guards the HTTP media endpoint, and
+        # one on-demand broadcaster fans a single cloud session out to all consumers.
+        self._token = secrets.token_urlsafe(32)
+        self._broadcast = CameraBroadcast(self._make_source)
         # Reuse the official `ezviz` device identifier so we land on the same device
         # card when that integration is installed, and stand alone otherwise (§6.3).
         self._attr_device_info = DeviceInfo(
@@ -77,6 +88,41 @@ class EzvizStreamCamera(Camera):
             name=subentry.title,
             manufacturer=MANUFACTURER,
             serial_number=self._serial,
+        )
+
+    def _make_source(self) -> AsyncIterator[bytes]:
+        """Build the upstream MPEG-TS source (called when the broadcaster starts)."""
+        api = self._entry.runtime_data.api
+        return mpegts_source(
+            api,
+            self._serial,
+            get_ffmpeg_manager(self.hass).binary,
+            stream=self._stream_index,
+            verification_code=self._verification_code,
+        )
+
+    async def async_added_to_hass(self) -> None:
+        """Register this camera's broadcaster so the media view can serve it."""
+        register_stream(self.hass, self._serial, self._token, self._broadcast)
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Deregister and stop this camera's broadcaster."""
+        unregister_stream(self.hass, self._serial)
+        await self._broadcast.async_stop()
+
+    async def stream_source(self) -> str:
+        """
+        Return the local HTTP MPEG-TS URL that go2rtc and the stream component read.
+
+        go2rtc rejects ``exec:`` sources via its API, and HA's ``stream`` component can
+        only ffmpeg-open a URL, so we serve MPEG-TS from our own token-guarded view
+        (:mod:`stream_view`). The broadcaster behind it fans one cloud session out to
+        all consumers (WebRTC + HLS + snapshots), so only one stream runs per camera.
+        """
+        port = self.hass.http.server_port
+        return (
+            f"http://127.0.0.1:{port}/api/ezviz_stream/{self._serial}"
+            f"?token={self._token}"
         )
 
     async def async_camera_image(

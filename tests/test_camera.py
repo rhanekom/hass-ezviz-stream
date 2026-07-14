@@ -23,6 +23,7 @@ from custom_components.ezviz_stream.const import (
     DOMAIN,
     OFFICIAL_EZVIZ_DOMAIN,
 )
+from custom_components.ezviz_stream.stream_view import DATA_STREAMS
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -146,3 +147,39 @@ async def test_snapshot_cached_within_ttl(hass: HomeAssistant) -> None:
     assert first == b"J" * 6000
     assert second == first
     assert grab.call_count == 1  # second call served from cache
+
+
+async def test_stream_source_and_registry_lifecycle(hass: HomeAssistant) -> None:
+    """stream_source is a token-guarded local HTTP URL; add/remove (de)registers it."""
+    entry = SimpleNamespace(
+        data={
+            CONF_USERNAME: "user@example.com",
+            CONF_PASSWORD: "hunter2",
+            CONF_REGION: "Europe",
+        },
+        runtime_data=SimpleNamespace(
+            api=AsyncMock(), stream_semaphore=asyncio.Semaphore(1)
+        ),
+    )
+    subentry = SimpleNamespace(
+        data={CONF_SERIAL: "SN1", CONF_VERIFICATION_CODE: "ABCDEF"},
+        title="Front door",
+        subentry_id="x",
+    )
+    camera = EzvizStreamCamera(entry, subentry)
+    camera.hass = hass
+    hass.http = SimpleNamespace(server_port=8123)
+
+    await camera.async_added_to_hass()
+    registry = hass.data[DOMAIN][DATA_STREAMS]
+    assert "SN1" in registry
+    assert registry["SN1"].broadcast is camera._broadcast
+
+    source = await camera.stream_source()
+    assert source.startswith("http://127.0.0.1:8123/api/ezviz_stream/SN1?token=")
+    assert camera._token in source
+    assert len(camera._token) >= 32  # a real random token, not empty/predictable
+    assert "hunter2" not in source  # account creds never touch the URL
+
+    await camera.async_will_remove_from_hass()
+    assert "SN1" not in registry

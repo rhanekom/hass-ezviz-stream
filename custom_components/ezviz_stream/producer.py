@@ -1,12 +1,13 @@
 """
-go2rtc ``exec:`` producer - stream a camera's Annex-B HEVC to stdout.
+Standalone diagnostic - stream a camera's Annex-B HEVC to stdout.
 
-Run by go2rtc as ``python -m custom_components.ezviz_stream.producer
---creds-file <path>``. Reads a JSON creds file (mode 600, written by the
-integration - never creds on the command line) with username/password/region/
-serial/stream, logs in, and writes the camera's Annex-B HEVC bitstream to stdout,
-which go2rtc ingests directly (spec §6). RTP/HEVC (battery cams) only for now;
-encrypted MPEG-PS (IPC) needs continuous decryption + remux (C.2b).
+Run manually as ``python -m custom_components.ezviz_stream.producer
+--creds-file <path>`` with a JSON creds file (username/password/region/serial/
+stream) to verify the live cloud path outside HA (e.g. ``... | ffplay -``). This is
+a debugging tool only: the integration streams in-process via :mod:`broadcast` and
+serves MPEG-TS over HTTP (:mod:`stream_view`) - go2rtc rejects ``exec:`` sources via
+its API, so it is never run by go2rtc. RTP/HEVC (battery cams) only; encrypted
+MPEG-PS (IPC) needs continuous decryption + remux (C.2b).
 """
 
 from __future__ import annotations

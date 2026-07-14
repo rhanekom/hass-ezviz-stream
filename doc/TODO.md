@@ -99,28 +99,72 @@ reconnect loop + KeepAlive.
       sessions for a keyframe (main stream). Continuous/efficient live view is
       go2rtc (C); stream selection (main/sub) becomes an option in D.
 
-### C. Serving (go2rtc)
+### C. Serving (on-demand HTTP MPEG-TS -> go2rtc)
+
+**Architecture decided (2026-07-14): serve MPEG-TS over a local HTTP view, not
+`exec:`.** HA-managed go2rtc blocks `exec:` two ways - its API rejects it (`source
+from insecure producer`; only `rtsp`/`http`-style sources are accepted) and its
+config restricts `exec:` to the `ffmpeg` binary only. HA's go2rtc integration always
+adds `stream_source()` via that API, so `exec:` can never work through it. Instead
+`stream_source()` returns a token-guarded `http://127.0.0.1:<port>/api/ezviz_stream/
+<serial>` URL; go2rtc pulls MPEG-TS from it (accepted via API, validated live) and
+the `stream` component ffmpeg-opens the same URL for HLS - one path fixes both.
 
 - [x] **C.1 - go2rtc provisioned** in the devcontainer (binary v1.9.14 + Dockerfile).
-- [~] **C.2 - producer (RTP/HEVC path), live-verified.** `stream.py stream_annexb()`
-      continuously writes Annex-B HEVC across the ~27 s drop (reconnect + KeepAlive);
-      `producer.py` (`python -m custom_components.ezviz_stream.producer --creds-file`)
-      logs in from a creds file (approach A) and streams to stdout, which go2rtc reads
-      as an H.265 bitstream directly (no ffmpeg wrapper needed). Verified live: a
-      battery cam decodes a real frame through the producer. `tests/test_producer.py`
-      covers camera selection.
-    - [ ] **C.2b - PS/encrypted (IPC) continuous path.** go2rtc doesn't read MPEG-PS;
-          needs incremental decryption + an ffmpeg remux (PS -> H.264 bitstream/TS).
-- [ ] **C.3 - wire the entity to go2rtc.** Camera declares `CameraEntityFeature.
-      STREAM`; `async_stream_source()` returns `exec:python -m ...producer
-      --creds-file <path>` (per-camera creds file written mode 600 on setup). Default
-      HEVC->H.264 via go2rtc `#video=h264`; native HEVC an option (§6.1). go2rtc then
-      serves WebRTC + snapshots (likely retiring the per-entity grab_jpeg). Provision
-      the creds-file writer + lifecycle (write on setup, remove on unload).
+- [~] **C.2 - in-process streaming core (RTP/HEVC), live-verified upstream.**
+      `stream.py`: `iter_annexb()` async-generator yields Annex-B HEVC across the ~27 s
+      drop (reconnect + KeepAlive); `stream_annexb()` is now a thin file-like wrapper
+      for the standalone diagnostic `producer.py` (no longer run by go2rtc). The
+      integration consumes `iter_annexb` in-process (no subprocess, no creds file).
+      `tests/test_stream.py` covers the wrapper + frame reader.
+    - [ ] **C.2b - PS/encrypted (IPC) continuous path.** `mpegts_source` handles
+          RTP/HEVC only; encrypted MPEG-PS (IPC) needs incremental decryption before the
+          FFmpeg remux (`verification_code` is already threaded through for it).
+- [~] **C.3 - entity + on-demand HTTP broadcaster (go2rtc side validated; needs live
+      HA verification).**
+    - `broadcast.py`: `mpegts_source()` remuxes a camera's HEVC to MPEG-TS via
+      `ffmpeg -f hevc -i pipe:0 -c copy -f mpegts pipe:1`; `CameraBroadcast` fans one
+      on-demand upstream session out to all subscribers (starts on first, stops on
+      last - battery-friendly), so go2rtc + HLS + snapshots share **one** cloud session
+      (no VTDU 5405/5452 storm).
+    - `stream_view.py`: `EzvizStreamMediaView` serves that MPEG-TS at
+      `/api/ezviz_stream/<serial>`, guarded by a per-camera random token (constant-time
+      compare); registered once in `__init__` (manifest `dependencies` gains `http`).
+    - `camera.py`: `stream_source()` returns the token URL; the per-camera creds file
+      and `exec:` are gone (account creds now stay in memory only - a security win).
+    - Unit-tested: fan-out + on-demand lifecycle + drop-oldest backpressure
+      (`test_broadcast.py`), view token/404 + streaming (`test_stream_view.py`),
+      stream_source URL + registry lifecycle (`test_camera.py`).
+    - **Validated out-of-HA:** go2rtc 1.9.14 accepts an `http://` MPEG-TS source via
+      its API (the exact two-`src` form HA uses) and re-served HEVC/TS over RTSP.
+      **Live-test in HA:** view a battery cam -> WebRTC via go2rtc, and confirm the HLS
+      `Protocol not found` error is gone.
+    - Known: `mpegts_source` resolves the camera (VTM routing) once per upstream start;
+      concurrent multi-camera *live* view opens one cloud session each (snapshot
+      concurrency stays capped by `stream_semaphore`) - revisit a live cap in D if it
+      trips VTDU limits.
 
 ### D. Polish
 
-- [ ] Options flow (codec, main/sub stream); reauth flow; diagnostics.
+- [ ] Options flow (codec, main/sub stream, **serving mode**, **frame rate**); reauth
+      flow; diagnostics. Frame rate: `broadcast._STREAM_FPS` is hardcoded 15 (main
+      stream); detect from the stream / make per-camera configurable (sub-stream may
+      differ). If a fixed CFR ever drifts from the true rate, escalate to preserving
+      the RTP 90 kHz timestamps through the depacketizer (fully-correct timing).
+- [ ] **D.x - MJPEG serving mode (opt-in fallback).** An alternative to the default
+      WebRTC-via-go2rtc path that needs no go2rtc/`stream` component and sidesteps
+      HEVC-in-browser entirely (ffmpeg decodes to JPEG server-side). Override
+      `Camera.handle_async_mjpeg_stream` (served at `/api/camera_proxy_stream/
+      <entity>`) to push frames from a continuous decode - a `mjpeg_source` sibling to
+      `broadcast.mpegts_source` (`ffmpeg -f hevc -i pipe:0 -c:v mjpeg -r <fps> -f
+      image2pipe`, split on JPEG markers), driven through the existing
+      `CameraBroadcast` so **one decode fans out to N viewers** (better than
+      ezviz_hp7's one-ffmpeg-per-viewer). Selected via the options flow. Trade-offs:
+      universal browser support + robust fallback, but heavy bandwidth (no interframe),
+      live-view only (no audio/recording), fps capped (~5-10). Reuses the cloud
+      session + on-demand lifecycle already built; scope is the source variant + the
+      mjpeg override + option + tests. See the streaming-architecture discussion (git
+      log / conversation 2026-07-14).
 - [ ] `hassfest` + HACS validation green (CI `validate.yml`).
 - [ ] README / docs: install + configuration.
 
