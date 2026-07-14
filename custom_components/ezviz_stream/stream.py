@@ -219,7 +219,12 @@ async def _capture_session(
             out += body
 
     if transport in ("mpeg-ps", "mpeg-ts") and verification_code:
-        out = bytearray(decrypt_ps_video(bytes(out), verification_code))
+        # AES over the whole captured buffer is CPU-heavy; run it off the event loop
+        # so it does not stall Home Assistant (asyncio logs slow on-loop steps).
+        decrypted = await asyncio.to_thread(
+            decrypt_ps_video, bytes(out), verification_code
+        )
+        out = bytearray(decrypted)
     return transport, bytes(out)
 
 
@@ -393,7 +398,12 @@ async def iter_ps_decrypted(
                 channel, _msg, body = frame
                 if channel != CH_STREAM or not body:
                     continue
-                chunk = decryptor.feed(body) if decryptor is not None else body
+                if decryptor is not None:
+                    # Decrypt off the event loop - continuous AES during live view
+                    # would otherwise keep the loop busy for the whole stream.
+                    chunk = await asyncio.to_thread(decryptor.feed, body)
+                else:
+                    chunk = body
                 if chunk:
                     yield chunk
         finally:

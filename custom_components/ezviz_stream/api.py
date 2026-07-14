@@ -297,7 +297,11 @@ class EzvizCloudApi:
             return None
         if HIK_ENCRYPTION_HEADER in data:
             try:
-                data = decrypt_still_image(data, verification_code)
+                # Decrypt off the event loop - AES over a full JPEG is CPU-heavy and
+                # would otherwise stall Home Assistant on every thumbnail refresh.
+                data = await asyncio.to_thread(
+                    decrypt_still_image, data, verification_code
+                )
             except StillImageDecryptError:
                 _LOGGER.debug("Could not decrypt motion image (check code)")
                 return None
