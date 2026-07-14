@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from custom_components.ezviz_stream import broadcast
+from custom_components.ezviz_stream.api import EzvizCamera
 from custom_components.ezviz_stream.broadcast import CameraBroadcast
 
 if TYPE_CHECKING:
@@ -133,3 +134,39 @@ async def test_mpegts_source_missing_camera_yields_nothing() -> None:
 
     assert chunks == []
     spawn.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("category", "expected_fmt", "expected_wallclock"),
+    [("BatteryCamera", "hevc", True), ("IPC", "mpeg", False)],
+)
+async def test_mpegts_source_selects_path_by_transport(
+    category: str, expected_fmt: str, *, expected_wallclock: bool
+) -> None:
+    """Battery cams remux raw HEVC (wall-clock); other cams remux MPEG-PS."""
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(
+        return_value=[EzvizCamera("SN1", "Cam", category, 1, 1, streamable=True)]
+    )
+    ffmpeg = MagicMock()
+    ffmpeg.stdout.read = AsyncMock(return_value=b"")  # end the read loop immediately
+    ffmpeg.returncode = 0  # so _terminate is a no-op
+
+    with (
+        patch(
+            "custom_components.ezviz_stream.broadcast._spawn_ffmpeg",
+            AsyncMock(return_value=ffmpeg),
+        ) as spawn,
+        patch("custom_components.ezviz_stream.broadcast._feed_rtp", AsyncMock()),
+        patch("custom_components.ezviz_stream.broadcast._feed_ps", AsyncMock()),
+    ):
+        chunks = [
+            chunk
+            async for chunk in broadcast.mpegts_source(
+                api, "SN1", "ffmpeg", stream=1, verification_code=""
+            )
+        ]
+
+    assert chunks == []
+    assert spawn.await_args.args[1] == expected_fmt
+    assert spawn.await_args.kwargs["wallclock"] is expected_wallclock

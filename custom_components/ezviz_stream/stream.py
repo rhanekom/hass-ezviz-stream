@@ -20,7 +20,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from .decrypt import decrypt_ps_video
+from .decrypt import StreamingPsDecryptor, decrypt_ps_video
 from .ysproto import (
     CH_STREAM,
     MSG_STREAMINFO_RSP,
@@ -330,6 +330,62 @@ async def iter_annexb(
                         # RTP 90 kHz timestamp of the packet completing this access
                         # unit (bytes 4-8 of the RTP header).
                         yield int.from_bytes(body[4:8], "big"), chunk
+        finally:
+            writer.close()
+            with contextlib.suppress(OSError):
+                await writer.wait_closed()
+        await asyncio.sleep(_RETRY_BACKOFF)
+
+
+async def iter_ps_decrypted(
+    camera: EzvizCamera,
+    token_factory: Callable[[], Awaitable[str]],
+    *,
+    stream: int,
+    verification_code: str,
+) -> AsyncIterator[bytes]:
+    """
+    Yield MPEG-PS bytes for an IPC camera, decrypting Image-Encryption on the fly.
+
+    Reconnects across the ~27 s drop like :func:`iter_annexb`. With a
+    ``verification_code`` a :class:`~.decrypt.StreamingPsDecryptor` decrypts complete
+    video-PES runs incrementally (a fresh one per session, so the incomplete run left
+    by a dropped session is simply discarded); otherwise the PS passes through. The PS
+    container carries its own PTS, so the consumer feeds ffmpeg ``-f mpeg`` with no
+    pacing needed.
+    """
+    while True:
+        try:
+            token = await token_factory()
+            reader, writer, stream_ssn = await open_stream(camera, token, stream=stream)
+        except StreamError as err:
+            _LOGGER.debug("PS stream handshake failed: %s", err)
+            await asyncio.sleep(_RETRY_BACKOFF)
+            continue
+
+        loop = asyncio.get_running_loop()
+        frames = _FrameReader(reader)
+        last_ka = loop.time()
+        decryptor = (
+            StreamingPsDecryptor(verification_code) if verification_code else None
+        )
+        try:
+            while True:
+                if stream_ssn and loop.time() - last_ka >= _KEEPALIVE_INTERVAL:
+                    writer.write(build_keepalive(stream_ssn))
+                    await writer.drain()
+                    last_ka = loop.time()
+                frame = await frames.next_frame(loop.time() + _READ_SLICE)
+                if frame is None:
+                    if frames.closed:
+                        break  # the ~27 s VTDU drop; reconnect below
+                    continue
+                channel, _msg, body = frame
+                if channel != CH_STREAM or not body:
+                    continue
+                chunk = decryptor.feed(body) if decryptor is not None else body
+                if chunk:
+                    yield chunk
         finally:
             writer.close()
             with contextlib.suppress(OSError):

@@ -105,6 +105,21 @@ def _fixture(nalu_header_size: int) -> tuple[bytes, bytes]:
     return clear, _encrypt_ps(clear, CODE, nalu_header_size)
 
 
+def _audio_pes() -> bytes:
+    """A minimal non-video (audio, 0xC0) PES packet - it ends a video-PES run."""
+    return b"\x00\x00\x01\xc0\x00\x04" + bytes(4)
+
+
+def _multi_run_fixture(nalu_header_size: int) -> tuple[bytes, bytes]:
+    """Three video-PES runs (one NAL each, split across 2 PES) separated by audio."""
+    parts = [_pack_header()]
+    for _frame in range(3):
+        nal = _nal(_CASES[nalu_header_size], body_len=300)
+        parts += [_video_pes(nal[:160]), _video_pes(nal[160:]), _audio_pes()]
+    clear = b"".join(parts)
+    return clear, _encrypt_ps(clear, CODE, nalu_header_size)
+
+
 @pytest.mark.parametrize("nhs", [0, 1, 2])
 def test_round_trip(nhs: int) -> None:
     clear, enc = _fixture(nhs)
@@ -137,3 +152,27 @@ def test_non_ps_input_is_returned_unchanged() -> None:
     # No video PES packets → nothing to decrypt.
     junk = b"not an mpeg-ps stream at all" * 4
     assert ez.decrypt_ps_video(junk, CODE, nalu_header_size=0) == junk
+
+
+@pytest.mark.parametrize("nhs", [0, 1, 2])
+@pytest.mark.parametrize("chunk", [1, 7, 64, 100000])
+def test_streaming_matches_one_shot(nhs: int, chunk: int) -> None:
+    """StreamingPsDecryptor over arbitrary chunk splits == one-shot decrypt_ps_video."""
+    _clear, enc = _multi_run_fixture(nhs)
+    expected = ez.decrypt_ps_video(enc, CODE, nalu_header_size=nhs)
+
+    dec = ez.StreamingPsDecryptor(CODE, nalu_header_size=nhs)
+    out = bytearray()
+    for i in range(0, len(enc), chunk):
+        out += dec.feed(enc[i : i + chunk])
+    out += dec.flush()
+
+    assert bytes(out) == expected
+
+
+def test_streaming_autodetects_header_size_on_flush() -> None:
+    """With no explicit header size, flush detects it and decrypts the buffer."""
+    clear, enc = _multi_run_fixture(0)
+    dec = ez.StreamingPsDecryptor(CODE)  # header size auto-detected
+    out = dec.feed(enc) + dec.flush()
+    assert out == ez.decrypt_ps_video(enc, CODE) == clear

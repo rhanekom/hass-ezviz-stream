@@ -18,7 +18,7 @@ import contextlib
 import logging
 from typing import TYPE_CHECKING
 
-from .stream import iter_annexb
+from .stream import iter_annexb, iter_ps_decrypted
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -38,23 +38,44 @@ _RTP_DISCONTINUITY = 2 * _RTP_CLOCK
 _MAX_PACE_SLEEP = 2.0  # safety cap on a single wait, so a bad timestamp can't stall us
 
 
+async def _spawn_ffmpeg(
+    ffmpeg_bin: str, input_fmt: str, *, wallclock: bool
+) -> asyncio.subprocess.Process:
+    """
+    Start ``ffmpeg -f <input_fmt> -i pipe:0 -c copy -f mpegts pipe:1``.
+
+    ``wallclock`` stamps input frames with their arrival time - needed for raw HEVC
+    (no container timestamps); MPEG-PS already carries PTS so it is left off.
+    """
+    args = [ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer"]
+    if wallclock:
+        args += ["-use_wallclock_as_timestamps", "1"]
+    args += ["-f", input_fmt, "-i", "pipe:0", "-c", "copy", "-f", "mpegts", "pipe:1"]
+    return await asyncio.create_subprocess_exec(
+        *args,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+
+
 async def mpegts_source(
     api: EzvizCloudApi,
     serial: str,
     ffmpeg_bin: str,
     *,
     stream: int,
-    verification_code: str,  # noqa: ARG001 - reserved for the encrypted-IPC path (C.2b)
+    verification_code: str,
 ) -> AsyncIterator[bytes]:
     """
-    Yield MPEG-TS chunks: the camera's RTP/HEVC remuxed by FFmpeg (copy, no transcode).
+    Yield MPEG-TS chunks remuxed from the camera's live stream (FFmpeg copy, no encode).
 
-    Resolves the camera fresh (for current VTM routing), feeds its Annex-B HEVC -
-    paced to the camera's RTP clock by :func:`_feed_hevc` - into
-    ``ffmpeg -f hevc -i pipe:0 -c copy -f mpegts pipe:1``, and yields the TS output.
-    Runs until the consumer stops iterating; FFmpeg is torn down on exit. RTP/HEVC
-    (battery cams) only for now - encrypted MPEG-PS (IPC) needs continuous decryption
-    plus a remux (C.2b), which is why ``verification_code`` is threaded through.
+    Resolves the camera fresh (for current VTM routing), then picks the path by
+    transport: battery cams stream raw RTP/HEVC (Annex-B, paced to the RTP clock and
+    wall-clock stamped by :func:`_feed_rtp`); other cams stream MPEG-PS, which
+    :func:`_feed_ps` decrypts on the fly (Image Encryption) and which already carries
+    PTS. Both remux to MPEG-TS. Runs until the consumer stops iterating; FFmpeg is torn
+    down on exit.
     """
     camera = next(
         (cam for cam in await api.async_get_cameras() if cam.serial == serial), None
@@ -63,36 +84,15 @@ async def mpegts_source(
         _LOGGER.warning("camera %s not found on the account", serial)
         return
 
-    ffmpeg = await asyncio.create_subprocess_exec(
-        ffmpeg_bin,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-fflags",
-        "nobuffer",
-        # Raw Annex-B HEVC carries no container timestamps. _feed_hevc paces frames
-        # into stdin on the camera's own RTP clock, so stamping them with their (paced)
-        # arrival time reproduces the real capture cadence - smooth, correct-rate, and
-        # immune to the VTDU's bursty delivery. (An assumed CFR would drift whenever the
-        # true rate differs; raw arrival-time stamping without pacing would jitter.)
-        "-use_wallclock_as_timestamps",
-        "1",
-        "-f",
-        "hevc",
-        "-i",
-        "pipe:0",
-        "-c:v",
-        "copy",
-        "-f",
-        "mpegts",
-        "pipe:1",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    feeder = asyncio.create_task(
-        _feed_hevc(camera, api.async_get_vtdu_token, ffmpeg, stream)
-    )
+    token_factory = api.async_get_vtdu_token
+    if camera.is_battery:
+        ffmpeg = await _spawn_ffmpeg(ffmpeg_bin, "hevc", wallclock=True)
+        feeder = asyncio.create_task(_feed_rtp(camera, token_factory, ffmpeg, stream))
+    else:
+        ffmpeg = await _spawn_ffmpeg(ffmpeg_bin, "mpeg", wallclock=False)
+        feeder = asyncio.create_task(
+            _feed_ps(camera, token_factory, ffmpeg, stream, verification_code)
+        )
     try:
         assert ffmpeg.stdout is not None  # noqa: S101 - PIPE guarantees a reader
         while True:
@@ -143,7 +143,7 @@ class _Pacer:
         return max(0.0, target - now)
 
 
-async def _feed_hevc(
+async def _feed_rtp(
     camera: object,
     token_factory: object,
     ffmpeg: asyncio.subprocess.Process,
@@ -158,6 +158,31 @@ async def _feed_hevc(
             delay = pacer.delay(rtp_ts, loop.time())
             if delay > 0:
                 await asyncio.sleep(min(delay, _MAX_PACE_SLEEP))
+            ffmpeg.stdin.write(chunk)
+            await ffmpeg.stdin.drain()
+    except BrokenPipeError, ConnectionResetError:
+        pass  # FFmpeg went away; the reader side will notice EOF and clean up
+    finally:
+        with contextlib.suppress(OSError):
+            ffmpeg.stdin.close()
+
+
+async def _feed_ps(
+    camera: object,
+    token_factory: object,
+    ffmpeg: asyncio.subprocess.Process,
+    stream: int,
+    verification_code: str,
+) -> None:
+    """Feed the camera's (decrypted) MPEG-PS into FFmpeg's stdin - PS carries PTS."""
+    assert ffmpeg.stdin is not None  # noqa: S101 - PIPE guarantees a writer
+    try:
+        async for chunk in iter_ps_decrypted(
+            camera,  # type: ignore[arg-type]
+            token_factory,  # type: ignore[arg-type]
+            stream=stream,
+            verification_code=verification_code,
+        ):
             ffmpeg.stdin.write(chunk)
             await ffmpeg.stdin.drain()
     except BrokenPipeError, ConnectionResetError:

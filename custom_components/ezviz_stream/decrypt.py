@@ -149,9 +149,9 @@ def _next_unbounded_video_pes_boundary(data: bytes, start: int) -> int | None:
     return None
 
 
-def _video_pes_payload_ranges(data: bytes) -> list[tuple[int, int]]:
-    """Payload (start, end) ranges of every video PES packet, in order."""
-    ranges: list[tuple[int, int]] = []
+def _video_pes_packets(data: bytes) -> list[tuple[int, int, int]]:
+    """(packet_start, payload_start, packet_end) of every video PES packet, in order."""
+    packets: list[tuple[int, int, int]] = []
     i = 0
     while i < len(data) - 9:
         if data[i : i + 3] != MPEG_START_CODE_PREFIX:
@@ -173,9 +173,80 @@ def _video_pes_payload_ranges(data: bytes) -> list[tuple[int, int]]:
         if packet_end > len(data):
             break
         if payload_start < packet_end:
-            ranges.append((payload_start, packet_end))
+            packets.append((i, payload_start, packet_end))
         i = max(i + 4, packet_end)
-    return ranges
+    return packets
+
+
+def _video_pes_payload_ranges(data: bytes) -> list[tuple[int, int]]:
+    """Payload (start, end) ranges of every video PES packet, in order."""
+    return [
+        (payload_start, end) for _start, payload_start, end in _video_pes_packets(data)
+    ]
+
+
+def _first_video_start(data: bytes, start: int) -> int | None:
+    """Offset of the first video-PES start code at/after ``start`` (else None).
+
+    Safe against false start codes inside encrypted payloads: it is only ever called
+    over a region whose leading bytes are container (pack/audio) up to the first video
+    packet start, and it returns at that first hit without scanning into any payload.
+    """
+    i = start
+    while i + 4 <= len(data):
+        if data[i : i + 3] == MPEG_START_CODE_PREFIX and _is_video_pes_stream_id(
+            data[i + 3]
+        ):
+            return i
+        i += 1
+    return None
+
+
+def _last_run_boundary(data: bytes) -> int:
+    """Offset where the last (possibly still-open) video-PES run begins.
+
+    ``decrypt_ps_video`` decrypts consecutive video-PES payloads as one "run" and
+    resets its AES state when a non-video PES packet interrupts them. Everything before
+    the last run therefore decrypts identically whether or not more bytes arrive, so a
+    streaming decryptor can safely emit up to here and buffer the (still-growing) last
+    run - including any incomplete trailing video packet. Returns ``len(data)`` only
+    when there is no video PES at all (pure container, safe to emit).
+    """
+    packets = _video_pes_packets(data)
+    if not packets:
+        # No complete video packet: buffer from the first (incomplete) video start.
+        # If none is visible yet, emit all but the last 3 bytes, which could be the
+        # leading "00 00 01" of a video start code whose stream-id byte hasn't arrived.
+        first = _first_video_start(data, 0)
+        return max(0, len(data) - 3) if first is None else first
+    last_run_start = packets[0][0]
+    prev_end = packets[0][2]
+    for packet_start, _payload_start, packet_end in packets[1:]:
+        if _has_non_video_pes_packet(data, prev_end, packet_start):
+            last_run_start = packet_start
+        prev_end = packet_end
+    # A video packet may be starting past the last complete one; if a non-video PES
+    # closed the last complete run first, that run is done and the trailing (incomplete)
+    # packet begins the new open run - buffer from there instead.
+    trailing = _first_video_start(data, prev_end)
+    if trailing is not None and _has_non_video_pes_packet(data, prev_end, trailing):
+        return trailing
+    return last_run_start
+
+
+def _last_complete_packet_end(data: bytes) -> int:
+    """End offset of the last complete MPEG-PS packet, 0 if none (safety valve)."""
+    end = i = 0
+    while i < len(data) - 3:
+        if data[i : i + 3] != MPEG_START_CODE_PREFIX:
+            i += 1
+            continue
+        packet_end = _mpeg_ps_packet_end(data, i)
+        if packet_end is None:
+            i += 1
+            continue
+        end = i = packet_end
+    return end
 
 
 def _has_non_video_pes_packet(data: bytes, start: int, end: int) -> bool:
@@ -495,3 +566,71 @@ def decrypt_ps_video(
         previous_video_end = payload_end
     flush_run()
     return bytes(output)
+
+
+# --------------------------------------------------------------------------- #
+# Streaming decryption (continuous IPC live view)
+# --------------------------------------------------------------------------- #
+_DETECT_MIN_BYTES = 64 * 1024  # buffer this much before auto-detecting nalu_header_size
+_MAX_STREAM_BUFFER = 16 * 1024 * 1024  # safety valve if no run boundary ever appears
+
+
+class StreamingPsDecryptor:
+    """Incrementally decrypt an EZVIZ Image-Encryption MPEG-PS byte stream.
+
+    Feed arbitrary byte chunks; each :meth:`feed` returns the bytes that are now safe
+    to emit - complete video-PES runs, whose decryption cannot change once later bytes
+    arrive - and buffers the still-open last run. :meth:`flush` decrypts and returns
+    whatever remains. The concatenation of every output equals :func:`decrypt_ps_video`
+    over the concatenated input, so it is validated against that one-shot oracle.
+
+    ``nalu_header_size`` is auto-detected once (it is stable per camera) after
+    ``_DETECT_MIN_BYTES`` have accumulated, then reused for the whole stream.
+    """
+
+    def __init__(
+        self, key: str | bytes, *, nalu_header_size: int | None = None
+    ) -> None:
+        """Start with an empty buffer; detect the header size lazily if not given."""
+        self._key = key
+        self._nalu_header_size = nalu_header_size
+        self._buf = bytearray()
+
+    def feed(self, chunk: bytes) -> bytes:
+        """Add ``chunk`` and return any now-safe decrypted bytes (may be empty)."""
+        self._buf += chunk
+        return self._drain(final=False)
+
+    def flush(self) -> bytes:
+        """Decrypt and return whatever remains buffered (call at end of stream)."""
+        return self._drain(final=True)
+
+    def _drain(self, *, final: bool) -> bytes:
+        if self._nalu_header_size is None and (
+            final or len(self._buf) >= _DETECT_MIN_BYTES
+        ):
+            self._nalu_header_size = detect_nalu_header_size(
+                bytes(self._buf), self._key
+            )
+        if self._nalu_header_size is None and not final:
+            return b""  # not enough evidence to detect the header size yet
+
+        if final:
+            cut = len(self._buf)
+        else:
+            cut = _last_run_boundary(bytes(self._buf))
+            if cut <= 0:
+                if len(self._buf) < _MAX_STREAM_BUFFER:
+                    return b""
+                cut = _last_complete_packet_end(bytes(self._buf))  # safety valve
+                if cut <= 0:
+                    return b""
+        if cut <= 0:
+            return b""
+
+        prefix = bytes(self._buf[:cut])
+        del self._buf[:cut]
+        nalu_header_size = (
+            self._nalu_header_size if self._nalu_header_size is not None else 2
+        )
+        return decrypt_ps_video(prefix, self._key, nalu_header_size=nalu_header_size)

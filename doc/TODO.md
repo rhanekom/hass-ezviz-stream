@@ -117,9 +117,16 @@ the `stream` component ffmpeg-opens the same URL for HLS - one path fixes both.
       file-like wrapper for the standalone diagnostic `producer.py` (no longer run by
       go2rtc). The integration consumes `iter_annexb` in-process (no subprocess, no
       creds file). `tests/test_stream.py` covers the wrapper + frame reader.
-    - [ ] **C.2b - PS/encrypted (IPC) continuous path.** `mpegts_source` handles
-          RTP/HEVC only; encrypted MPEG-PS (IPC) needs incremental decryption before the
-          FFmpeg remux (`verification_code` is already threaded through for it).
+    - [x] **C.2b - PS/encrypted (IPC) continuous path (live-verified 2026-07-14).**
+          `decrypt.StreamingPsDecryptor` decrypts Image-Encryption
+          MPEG-PS incrementally, emitting on video-PES run boundaries (where the AES
+          state resets) and buffering the open run - byte-identical to the one-shot
+          `decrypt_ps_video` oracle across all chunk splits, validated on synthetic
+          fixtures (nhs 0/1/2) and all four real captures. `stream.iter_ps_decrypted`
+          drives it across reconnects (fresh decryptor per session). `mpegts_source`
+          now branches on transport: battery -> RTP/HEVC (paced), else -> MPEG-PS
+          (decrypted); both remux to MPEG-TS (`ffmpeg -f mpeg -c copy`, PS carries its
+          own PTS so no pacing). Confirmed live: an encrypted IPC cam streams in HA.
 - [x] **C.3 - entity + on-demand HTTP broadcaster; live-verified (WebRTC up, HLS
       `Protocol not found` gone, snapshots working).**
     - `broadcast.py`: `mpegts_source()` remuxes a camera's HEVC to MPEG-TS via
