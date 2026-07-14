@@ -24,6 +24,10 @@ MAX_MAX_SNAPSHOTS: Final = 5
 CAMERA_SUBENTRY_TYPE: Final = "camera"
 CONF_SERIAL: Final = "serial"
 CONF_VERIFICATION_CODE: Final = "verification_code"
+# Cached at add time: is this a battery-powered camera? Exposed read-only on the
+# entity and in the config flow. Stored so it needs no repeated cloud lookup; the
+# entity self-resolves it once for cameras added before this was recorded.
+CONF_IS_BATTERY: Final = "is_battery"
 # Deprecated boolean cadence flag (kept only so subentries created before the
 # explicit interval landed still map to a sensible TTL on read). Superseded by
 # CONF_SNAPSHOT_INTERVAL; no longer written by the config flow.

@@ -21,6 +21,7 @@ from custom_components.ezviz_stream.api import (
 )
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_IS_BATTERY,
     CONF_MAX_SNAPSHOTS,
     CONF_MOTION_THUMBNAIL,
     CONF_REGION,
@@ -180,6 +181,7 @@ async def test_add_camera_subentry(hass: HomeAssistant) -> None:
         CONF_MOTION_THUMBNAIL: False,  # SN1 is an IPC (mains) cam
         CONF_SNAPSHOT_INTERVAL: DEFAULT_SNAPSHOT_INTERVAL,  # mains default
         CONF_STREAM: 1,  # main stream by default
+        CONF_IS_BATTERY: False,
     }
 
 
@@ -209,6 +211,7 @@ async def test_add_battery_camera_defaults_to_motion_thumbnail(
     assert result["data"][CONF_MOTION_THUMBNAIL] is True
     assert result["data"][CONF_SNAPSHOT_INTERVAL] == DEFAULT_SNAPSHOT_INTERVAL_BATTERY
     assert result["data"][CONF_STREAM] == 2  # battery cams default to the sub stream
+    assert result["data"][CONF_IS_BATTERY] is True  # recorded at add time
 
 
 async def test_add_camera_aborts_when_all_added(hass: HomeAssistant) -> None:
@@ -281,6 +284,7 @@ async def test_reconfigure_camera_subentry(hass: HomeAssistant) -> None:
         CONF_MOTION_THUMBNAIL: True,
         CONF_SNAPSHOT_INTERVAL: 900,
         CONF_STREAM: 2,  # switched to sub stream
+        CONF_IS_BATTERY: False,  # resolved + backfilled from the account (SN1 is IPC)
     }
 
 

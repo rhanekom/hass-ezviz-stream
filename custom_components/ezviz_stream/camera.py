@@ -17,6 +17,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from .broadcast import CameraBroadcast, mpegts_source
 from .const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_IS_BATTERY,
     CONF_MOTION_THUMBNAIL,
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
@@ -117,6 +118,8 @@ class EzvizStreamCamera(Camera):
         self._motion_thumbnail: bool = subentry.data.get(CONF_MOTION_THUMBNAIL, False)
         self._snapshot_interval: float = _resolve_interval(subentry.data)
         self._stream_index: int = subentry.data.get(CONF_STREAM, DEFAULT_STREAM)
+        # None until known (cameras added before this was recorded resolve it once).
+        self._is_battery: bool | None = subentry.data.get(CONF_IS_BATTERY)
         self._attr_unique_id = self._serial
         self._image: bytes | None = None  # last decoded frame (snapshot cache)
         self._image_at = 0.0
@@ -155,6 +158,11 @@ class EzvizStreamCamera(Camera):
         """How long a cached frame stays fresh (the per-camera refresh interval)."""
         return self._snapshot_interval
 
+    @property
+    def extra_state_attributes(self) -> dict[str, bool | None]:
+        """Read-only camera facts. `battery_camera` is None until first resolved."""
+        return {"battery_camera": self._is_battery}
+
     async def async_added_to_hass(self) -> None:
         """Register the broadcaster and restore the last frame as a failure fallback."""
         register_stream(self.hass, self._serial, self._token, self._broadcast)
@@ -166,6 +174,27 @@ class EzvizStreamCamera(Camera):
         )
         if restored is not None and self._image is None:
             self._image = restored
+        # Cameras added before is_battery was recorded resolve it once, off the setup
+        # path (a single cloud control-plane call - it does not wake the camera).
+        if self._is_battery is None:
+            self.hass.async_create_background_task(
+                self._async_resolve_battery(),
+                f"ezviz_stream resolve battery {self._serial}",
+                eager_start=False,
+            )
+
+    async def _async_resolve_battery(self) -> None:
+        """Look up whether this is a battery camera and publish it (never raises)."""
+        try:
+            cameras = await self._entry.runtime_data.api.async_get_cameras()
+        except Exception:  # noqa: BLE001 - a background task must not leak
+            _LOGGER.debug("Could not resolve battery status for %s", self._serial)
+            return
+        camera = next((c for c in cameras if c.serial == self._serial), None)
+        if camera is not None and self._is_battery is None:
+            self._is_battery = camera.is_battery
+            if self.entity_id:  # published only once the entity is fully added
+                self.async_write_ha_state()
 
     async def async_will_remove_from_hass(self) -> None:
         """Deregister, stop the broadcaster, and delete the persisted frame."""

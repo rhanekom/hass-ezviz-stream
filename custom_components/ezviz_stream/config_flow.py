@@ -49,6 +49,7 @@ from .api import (
 )
 from .const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_IS_BATTERY,
     CONF_MAX_SNAPSHOTS,
     CONF_MOTION_THUMBNAIL,
     CONF_REGION,
@@ -171,9 +172,11 @@ def _camera_note(*, is_battery: bool) -> str:
     )
 
 
-def _camera_subentry_data(serial: str, user_input: dict[str, Any]) -> dict[str, Any]:
+def _camera_subentry_data(
+    serial: str, user_input: dict[str, Any], *, is_battery: bool | None
+) -> dict[str, Any]:
     """Build the subentry data dict from a flattened options/reconfigure form."""
-    return {
+    data = {
         CONF_SERIAL: serial,
         CONF_VERIFICATION_CODE: user_input.get(CONF_VERIFICATION_CODE, ""),
         CONF_MOTION_THUMBNAIL: user_input.get(CONF_MOTION_THUMBNAIL, False),
@@ -182,6 +185,16 @@ def _camera_subentry_data(serial: str, user_input: dict[str, Any]) -> dict[str, 
         ),
         CONF_STREAM: int(user_input[CONF_STREAM]),
     }
+    if is_battery is not None:  # omit when unknown rather than store a null
+        data[CONF_IS_BATTERY] = is_battery
+    return data
+
+
+def _yes_no(value: bool | None) -> str:  # noqa: FBT001 - simple display formatter
+    """Format a tri-state battery flag for display in the config flow."""
+    if value is None:
+        return "Unknown"
+    return "Yes" if value else "No"
 
 
 def _stored_interval(data: Mapping[str, Any]) -> int:
@@ -407,7 +420,11 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
         assert camera is not None  # noqa: S101 - set by async_step_user before we get here
 
         if user_input is not None:
-            data = _camera_subentry_data(camera.serial, _flatten_options(user_input))
+            data = _camera_subentry_data(
+                camera.serial,
+                _flatten_options(user_input),
+                is_battery=camera.is_battery,
+            )
             if await self._async_frame_ok(data):
                 return self.async_create_entry(
                     title=camera.label, unique_id=camera.serial, data=data
@@ -432,6 +449,7 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
             ),
             description_placeholders={
                 "camera": camera.label,
+                "battery": _yes_no(camera.is_battery),
                 "camera_note": _camera_note(is_battery=camera.is_battery),
             },
         )
@@ -441,9 +459,12 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Edit an already-added camera's verification code, cadence, and stream."""
         subentry = self._get_reconfigure_subentry()
+        is_battery = await self._async_resolve_is_battery(subentry)
         if user_input is not None:
             data = _camera_subentry_data(
-                subentry.data[CONF_SERIAL], _flatten_options(user_input)
+                subentry.data[CONF_SERIAL],
+                _flatten_options(user_input),
+                is_battery=is_battery,
             )
             if await self._async_frame_ok(data):
                 return self.async_update_and_abort(
@@ -460,8 +481,24 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
                 snapshot_interval=_stored_interval(subentry.data),
                 stream=subentry.data.get(CONF_STREAM, DEFAULT_STREAM),
             ),
-            description_placeholders={"camera": subentry.title},
+            description_placeholders={
+                "camera": subentry.title,
+                "battery": _yes_no(is_battery),
+            },
         )
+
+    async def _async_resolve_is_battery(self, subentry: ConfigSubentry) -> bool | None:
+        """Return the cached battery flag, else look it up from the account once."""
+        if CONF_IS_BATTERY in subentry.data:
+            return bool(subentry.data[CONF_IS_BATTERY])
+        try:
+            cameras = await self._async_account_cameras(self._get_entry())
+        except CannotConnect, InvalidAuth, MfaRequired:
+            return None
+        camera = next(
+            (c for c in cameras if c.serial == subentry.data[CONF_SERIAL]), None
+        )
+        return camera.is_battery if camera is not None else None
 
     async def async_step_verify_failed(
         self,

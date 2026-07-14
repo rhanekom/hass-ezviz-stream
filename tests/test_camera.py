@@ -17,6 +17,7 @@ from custom_components.ezviz_stream.api import EzvizCamera
 from custom_components.ezviz_stream.camera import EzvizStreamCamera
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_IS_BATTERY,
     CONF_MOTION_THUMBNAIL,
     CONF_REGION,
     CONF_SERIAL,
@@ -207,6 +208,44 @@ def test_snapshot_interval_sets_cache_ttl() -> None:
         ),
     )
     assert camera._cache_ttl == 120
+
+
+def test_battery_attribute_from_stored_value() -> None:
+    """The stored battery flag is exposed as a read-only camera attribute."""
+    entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(
+            api=AsyncMock(), snapshot_semaphore=asyncio.Semaphore(1)
+        )
+    )
+    camera = EzvizStreamCamera(
+        entry,
+        SimpleNamespace(
+            data={CONF_SERIAL: "SN1", CONF_IS_BATTERY: True},
+            title="Cam",
+            subentry_id="x",
+        ),
+    )
+    assert camera.extra_state_attributes == {"battery_camera": True}
+
+
+async def test_battery_attribute_resolved_when_absent(hass: HomeAssistant) -> None:
+    """A camera added before the flag was recorded resolves it once from the cloud."""
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(
+        return_value=[EzvizCamera("SN1", "Cam", "BatteryCamera", 1, 1, streamable=True)]
+    )
+    entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(api=api, snapshot_semaphore=asyncio.Semaphore(1))
+    )
+    camera = EzvizStreamCamera(
+        entry,
+        SimpleNamespace(data={CONF_SERIAL: "SN1"}, title="Cam", subentry_id="x"),
+    )
+    camera.hass = hass
+
+    assert camera.extra_state_attributes == {"battery_camera": None}  # unknown at first
+    await camera._async_resolve_battery()
+    assert camera.extra_state_attributes == {"battery_camera": True}
 
 
 def test_legacy_slow_thumbnails_maps_to_interval() -> None:

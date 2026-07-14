@@ -59,7 +59,7 @@
         },
         "options": {
           "title": "Camera options",
-          "description": "Configure {camera}. If it has Image Encryption enabled, enter its verification code (the 6-character code on the camera label); leave blank otherwise. Saving grabs a frame to check the settings.{camera_note}",
+          "description": "Configure {camera}. **Battery camera: {battery}.** If it has Image Encryption enabled, enter its verification code (the 6-character code on the camera label); leave blank otherwise. Saving grabs a frame to check the settings.{camera_note}",
           "data": {
             "verification_code": "Verification code (encryption password)"
           },
@@ -80,7 +80,7 @@
         },
         "reconfigure": {
           "title": "Camera options",
-          "description": "Update {camera}. If it has Image Encryption enabled, enter its verification code (the 6-character code on the camera label); leave blank otherwise. Saving grabs a frame to check the settings.",
+          "description": "Update {camera}. **Battery camera: {battery}.** If it has Image Encryption enabled, enter its verification code (the 6-character code on the camera label); leave blank otherwise. Saving grabs a frame to check the settings.",
           "data": {
             "verification_code": "Verification code (encryption password)"
           },
