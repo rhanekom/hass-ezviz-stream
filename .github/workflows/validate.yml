@@ -33,6 +33,3 @@ jobs:
           uses: "hacs/action@1ebf01c408f29afcb6406bd431bc98fd8cbb15aa" # main
           with:
             category: "integration"
-            # 'brands' needs a separate home-assistant/brands PR (icon/logo assets);
-            # skip it here so CI is green pre-publish. Remove once brands are added.
-            ignore: "brands"
