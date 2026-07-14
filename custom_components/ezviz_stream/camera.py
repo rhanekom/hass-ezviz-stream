@@ -19,7 +19,9 @@ from .const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
+    CONF_STREAM,
     CONF_VERIFICATION_CODE,
+    DEFAULT_STREAM,
     MANUFACTURER,
     OFFICIAL_EZVIZ_DOMAIN,
 )
@@ -32,7 +34,6 @@ _LOGGER = logging.getLogger(__name__)
 # fetch does not hang. Efficient live view arrives with go2rtc (Milestone C).
 _SNAPSHOT_TIMEOUT = 30.0
 _SNAPSHOT_MAX_SESSIONS = 3  # limit reconnect churn per image request
-_MAIN_STREAM = 1
 # Serve a cached frame for this long so HA's image polling does not re-stream on
 # every poll (each grab is a full cloud session). Battery cams (and any camera the
 # user flags) use the slower cadence - they wake slowly and streaming drains them.
@@ -105,7 +106,7 @@ class EzvizStreamCamera(Camera):
         self._serial: str = subentry.data[CONF_SERIAL]
         self._verification_code: str = subentry.data.get(CONF_VERIFICATION_CODE, "")
         self._slow_thumbnails: bool = subentry.data.get(CONF_SLOW_THUMBNAILS, False)
-        self._stream_index: int = _MAIN_STREAM
+        self._stream_index: int = subentry.data.get(CONF_STREAM, DEFAULT_STREAM)
         self._attr_unique_id = self._serial
         self._image: bytes | None = None  # last decoded frame (snapshot cache)
         self._image_at = 0.0
@@ -225,7 +226,7 @@ class EzvizStreamCamera(Camera):
                     camera,
                     api.async_get_vtdu_token,
                     get_ffmpeg_manager(self.hass).binary,
-                    stream=_MAIN_STREAM,
+                    stream=self._stream_index,
                     verification_code=self._verification_code,
                     duration=_SNAPSHOT_TIMEOUT,
                     max_sessions=_SNAPSHOT_MAX_SESSIONS,

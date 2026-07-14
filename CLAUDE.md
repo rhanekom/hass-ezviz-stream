@@ -33,7 +33,9 @@ uv run pre-commit run --all-files  # Run all hooks
 Pre-commit hooks: pre-commit-hooks (json/yaml/toml validation, hygiene,
 detect-private-key), codespell, ruff (+ ruff-format), markdownlint, shellcheck,
 actionlint, gitleaks (secret scanning), pip-audit (dependency vulnerabilities),
-pytest (full test suite, runs when any `.py` file is staged).
+pytest (full test suite, runs when any `.py` file is staged), duplicate-code
+(pylint's copy/paste detector over `custom_components/ezviz_stream`; config in
+`pyproject.toml [tool.pylint]`).
 
 ### Testing
 

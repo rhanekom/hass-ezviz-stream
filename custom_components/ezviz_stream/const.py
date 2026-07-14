@@ -17,6 +17,11 @@ CONF_VERIFICATION_CODE: Final = "verification_code"
 # Poll this camera's thumbnail less often. Defaults on for battery cameras (slow to
 # wake, and each grab is a full cloud session), user-overridable in the subentry flow.
 CONF_SLOW_THUMBNAILS: Final = "slow_thumbnails"
+# Which track to stream/snapshot: main (1, HD) or sub (2, lower-res, less bandwidth).
+CONF_STREAM: Final = "stream"
+MAIN_STREAM: Final = 1
+SUB_STREAM: Final = 2
+DEFAULT_STREAM: Final = MAIN_STREAM
 
 DEFAULT_REGION: Final = "Europe"
 

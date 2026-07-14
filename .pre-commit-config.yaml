@@ -47,7 +47,7 @@ repos:
       - id: codespell
         name: 🔤 codespell
         args:
-          - --ignore-words-list=hass,alot,datas,dof,dur,farenheit,hist,iff,ines,ist,lightsensor,mut,nd,pres,referer,ser,serie,te,technik,ue,uint,visability,wan,wanna,withing
+          - --ignore-words-list=hass,alot,astroid,datas,dof,dur,farenheit,hist,iff,ines,ist,lightsensor,mut,nd,pres,referer,ser,serie,te,technik,ue,uint,visability,wan,wanna,withing
           - --skip="./.*,*.csv,*.json"
           - --quiet-level=2
         exclude_types: [csv, json]
@@ -119,3 +119,15 @@ repos:
         language: system
         pass_filenames: false
         files: \.py$
+
+  # Duplicate-code (copy/paste) detector - the one thing ruff does not cover. Runs
+  # pylint over the whole integration package (config in pyproject.toml: only
+  # duplicate-code enabled), so it compares across files regardless of which changed.
+  - repo: local
+    hooks:
+      - id: duplicate-code
+        name: 🧬 duplicate-code (pylint)
+        entry: uv run pylint custom_components/ezviz_stream
+        language: system
+        pass_filenames: false
+        files: ^custom_components/ezviz_stream/.*\.py$

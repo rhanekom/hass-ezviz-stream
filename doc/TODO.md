@@ -156,9 +156,17 @@ the `stream` component ffmpeg-opens the same URL for HLS - one path fixes both.
 
 ### D. Polish
 
-- [ ] Options flow (codec, main/sub stream, **serving mode**); reauth flow;
-      diagnostics. (Frame-rate handling is solved by RTP-timestamp pacing - no fps
-      option needed.)
+- [~] Config-flow polish. **Done:** per-camera reconfigure (verification code,
+      slow-thumbnails, **main/sub stream** via `CONF_STREAM`) as a subentry
+      `reconfigure` step sharing one schema with the add flow; **account reauth**
+      (`async_step_reauth` -> re-enter password, keeping user/region); **frame-grab
+      validation** on add/reconfigure (a real `grab_jpeg` confirms the code + stream;
+      on failure a `verify_failed` menu offers retry / save-anyway - soft block); the
+      form shows only the verification code, with cadence + stream in a collapsed
+      **Advanced** section; a **battery-drain warning** shows when adding a battery
+      camera. **Remaining:** codec option (needs the go2rtc
+      transcode-vs-native decision), serving-mode option (needs MJPEG first),
+      diagnostics download. (Frame rate is solved by RTP pacing.)
 - [ ] **OPEN DECISION - live buffer methodology.** With RTP-timestamp pacing the
       source timeline is correct, but the player can still chase the live edge
       (WebRTC minimises latency and skips/"catches up" rather than lagging steadily).
@@ -192,7 +200,10 @@ the `stream` component ffmpeg-opens the same URL for HLS - one path fixes both.
       session + on-demand lifecycle already built; scope is the source variant + the
       mjpeg override + option + tests. See the streaming-architecture discussion (git
       log / conversation 2026-07-14).
-- [ ] `hassfest` + HACS validation green (CI `validate.yml`).
+- [x] `hassfest` + HACS validation green (CI `validate.yml`). Added manifest
+      `issue_tracker`, repo topics, and `ignore: brands` on the HACS action (brand
+      assets still need a home-assistant/brands PR before default-store submission).
+      Hassfest emits a harmless deprecation nudge about the config `title` key.
 - [ ] README / docs: install + configuration.
 
 ## Later / nice-to-have

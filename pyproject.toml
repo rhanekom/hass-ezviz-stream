@@ -33,6 +33,7 @@ dev = [
     "pyezvizapi>=1.0.5.0",
     "pyturbojpeg>=2.4.0",
     "ha-ffmpeg>=3.2.2",
+    "pylint>=4.0.6",
 ]
 
 # This repo is a Home Assistant custom component, not an installable package, so
@@ -46,3 +47,17 @@ package = false
 # so plain sync unit tests (e.g. the decryptor tests) run cleanly alongside future
 # HA integration tests.
 asyncio_mode = "auto"
+
+# Pylint runs for one thing only: the duplicate-code (copy/paste) detector, which
+# ruff does not provide. Everything else is disabled (ruff owns linting). The
+# `duplicate-code` pre-commit hook runs this over custom_components/ezviz_stream.
+[tool.pylint."messages control"]
+disable = ["all"]
+enable = ["duplicate-code"]
+
+[tool.pylint.similarities]
+min-similarity-lines = 6  # flag copy/paste of 6+ similar lines; tune if too strict
+ignore-comments = true
+ignore-docstrings = true
+ignore-imports = true
+ignore-signatures = true

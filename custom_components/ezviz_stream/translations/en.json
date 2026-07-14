@@ -2,12 +2,17 @@
   "config": {
     "step": {
       "user": {
-        "title": "EZVIZ account",
         "description": "Sign in with your EZVIZ cloud account. Two-step verification must be disabled.",
         "data": {
           "username": "Email",
           "password": "Password",
           "region": "Region"
+        }
+      },
+      "reauth_confirm": {
+        "description": "The EZVIZ credentials for {username} are no longer valid. Enter the current password to reconnect.",
+        "data": {
+          "password": "Password"
         }
       }
     },
@@ -19,7 +24,8 @@
       "unknown": "An unexpected error occurred."
     },
     "abort": {
-      "already_configured": "This EZVIZ account is already configured."
+      "already_configured": "This EZVIZ account is already configured.",
+      "reauth_successful": "Re-authentication was successful."
     }
   },
   "config_subentries": {
@@ -39,17 +45,50 @@
         },
         "options": {
           "title": "Camera options",
-          "description": "Configure {camera}. If it has Image Encryption enabled, enter its verification code (the 6-character code on the camera label); leave blank otherwise.",
+          "description": "Configure {camera}. If it has Image Encryption enabled, enter its verification code (the 6-character code on the camera label); leave blank otherwise. Saving grabs a frame to check the settings.{battery_note}",
           "data": {
-            "verification_code": "Verification code (encryption password)",
-            "slow_thumbnails": "Slow thumbnail refresh (recommended for battery cameras)"
+            "verification_code": "Verification code (encryption password)"
+          },
+          "sections": {
+            "advanced": {
+              "name": "Advanced",
+              "data": {
+                "slow_thumbnails": "Slow thumbnail refresh (recommended for battery cameras)",
+                "stream": "Video stream"
+              }
+            }
+          }
+        },
+        "reconfigure": {
+          "title": "Camera options",
+          "description": "Update {camera}. If it has Image Encryption enabled, enter its verification code (the 6-character code on the camera label); leave blank otherwise. Saving grabs a frame to check the settings.",
+          "data": {
+            "verification_code": "Verification code (encryption password)"
+          },
+          "sections": {
+            "advanced": {
+              "name": "Advanced",
+              "data": {
+                "slow_thumbnails": "Slow thumbnail refresh (recommended for battery cameras)",
+                "stream": "Video stream"
+              }
+            }
+          }
+        },
+        "verify_failed": {
+          "title": "Couldn't verify the camera",
+          "description": "No video frame was received. The verification code may be wrong, or the camera may be asleep or temporarily unreachable. Try again, or save anyway.",
+          "menu_options": {
+            "retry": "Try again",
+            "save_anyway": "Save anyway"
           }
         }
       },
       "abort": {
         "no_cameras": "All streamable cameras on this account have already been added.",
         "cannot_connect": "Unable to connect to the EZVIZ cloud.",
-        "invalid_auth": "The account credentials are no longer valid. Reconfigure the account."
+        "invalid_auth": "The account credentials are no longer valid. Reconfigure the account.",
+        "reconfigure_successful": "Camera updated."
       }
     }
   }
