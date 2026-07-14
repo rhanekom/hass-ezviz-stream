@@ -30,10 +30,12 @@ _LOGGER = logging.getLogger(__name__)
 _TS_READ = 65536  # bytes per read from FFmpeg's MPEG-TS output
 _QUEUE_MAX = 512  # per-subscriber backlog; a slow consumer drops its oldest chunks
 _FFMPEG_TERM_TIMEOUT = 5.0
-# EZVIZ battery cams stream constant-rate 15 fps on the main stream. Raw Annex-B HEVC
-# carries no timing, so we declare the rate to FFmpeg for a clean CFR timeline; TODO
-# (D): detect per stream / make configurable when sub-stream + codec options land.
-_STREAM_FPS = 15
+# Playback pacing (see _Pacer): the RTP timestamp is a 90 kHz clock; a step that is
+# negative or larger than this (2 s) means a discontinuity - a reconnect's fresh RTP
+# base or a 32-bit wrap - so we rebase the schedule to "now" instead of replaying it.
+_RTP_CLOCK = 90000
+_RTP_DISCONTINUITY = 2 * _RTP_CLOCK
+_MAX_PACE_SLEEP = 2.0  # safety cap on a single wait, so a bad timestamp can't stall us
 
 
 async def mpegts_source(
@@ -47,7 +49,8 @@ async def mpegts_source(
     """
     Yield MPEG-TS chunks: the camera's RTP/HEVC remuxed by FFmpeg (copy, no transcode).
 
-    Resolves the camera fresh (for current VTM routing), feeds its Annex-B HEVC into
+    Resolves the camera fresh (for current VTM routing), feeds its Annex-B HEVC -
+    paced to the camera's RTP clock by :func:`_feed_hevc` - into
     ``ffmpeg -f hevc -i pipe:0 -c copy -f mpegts pipe:1``, and yields the TS output.
     Runs until the consumer stops iterating; FFmpeg is torn down on exit. RTP/HEVC
     (battery cams) only for now - encrypted MPEG-PS (IPC) needs continuous decryption
@@ -67,14 +70,13 @@ async def mpegts_source(
         "error",
         "-fflags",
         "nobuffer",
-        # Raw Annex-B HEVC carries no container timestamps, so with -c copy ffmpeg
-        # would otherwise invent a PTS timeline at its default 25 fps - too fast for a
-        # 15 fps camera (buffer drains, periodic rebuffer). Declaring the real input
-        # frame rate gives a clean constant-rate PTS timeline, which plays smoother
-        # than wall-clock stamping (the VTDU delivers in bursts, so arrival-time
-        # stamps jitter and the player skips to catch up).
-        "-r",
-        str(_STREAM_FPS),
+        # Raw Annex-B HEVC carries no container timestamps. _feed_hevc paces frames
+        # into stdin on the camera's own RTP clock, so stamping them with their (paced)
+        # arrival time reproduces the real capture cadence - smooth, correct-rate, and
+        # immune to the VTDU's bursty delivery. (An assumed CFR would drift whenever the
+        # true rate differs; raw arrival-time stamping without pacing would jitter.)
+        "-use_wallclock_as_timestamps",
+        "1",
         "-f",
         "hevc",
         "-i",
@@ -105,16 +107,57 @@ async def mpegts_source(
         await _terminate(ffmpeg)
 
 
+def _s32(value: int) -> int:
+    """Interpret a 32-bit RTP-timestamp delta as signed (handles the clock wrap)."""
+    return ((value + 0x80000000) & 0xFFFFFFFF) - 0x80000000
+
+
+class _Pacer:
+    """
+    Turn a camera's RTP 90 kHz timestamps into a real-time release schedule.
+
+    :meth:`delay` returns how long to wait before releasing the frame stamped ``ts``
+    so playback follows the camera's own cadence, smoothing the VTDU's bursty
+    delivery. The first frame - and any discontinuity, i.e. a reconnect's fresh RTP
+    base or a 32-bit wrap - rebases the schedule to ``now`` (play immediately) rather
+    than trying to replay a gap.
+    """
+
+    def __init__(self) -> None:
+        """Start unscheduled; the first frame establishes the base."""
+        self._rtp_base: int | None = None
+        self._wall_base = 0.0
+        self._last_ts = 0
+
+    def delay(self, ts: int, now: float) -> float:
+        """Seconds to wait before releasing the frame stamped ``ts`` at time ``now``."""
+        if self._rtp_base is None or not (
+            0 <= _s32(ts - self._last_ts) <= _RTP_DISCONTINUITY
+        ):
+            self._rtp_base = ts
+            self._wall_base = now
+            self._last_ts = ts
+            return 0.0
+        self._last_ts = ts
+        target = self._wall_base + _s32(ts - self._rtp_base) / _RTP_CLOCK
+        return max(0.0, target - now)
+
+
 async def _feed_hevc(
     camera: object,
     token_factory: object,
     ffmpeg: asyncio.subprocess.Process,
     stream: int,
 ) -> None:
-    """Pump the camera's Annex-B HEVC into FFmpeg's stdin until cancelled."""
+    """Pace the camera's Annex-B HEVC into FFmpeg's stdin on its RTP clock."""
     assert ffmpeg.stdin is not None  # noqa: S101 - PIPE guarantees a writer
+    loop = asyncio.get_running_loop()
+    pacer = _Pacer()
     try:
-        async for chunk in iter_annexb(camera, token_factory, stream=stream):  # type: ignore[arg-type]
+        async for rtp_ts, chunk in iter_annexb(camera, token_factory, stream=stream):  # type: ignore[arg-type]
+            delay = pacer.delay(rtp_ts, loop.time())
+            if delay > 0:
+                await asyncio.sleep(min(delay, _MAX_PACE_SLEEP))
             ffmpeg.stdin.write(chunk)
             await ffmpeg.stdin.drain()
     except BrokenPipeError, ConnectionResetError:

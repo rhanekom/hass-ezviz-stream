@@ -46,8 +46,8 @@ async def test_stream_annexb_writes_iter_annexb_chunks() -> None:
     """stream_annexb (the CLI producer wrapper) writes+flushes each yielded chunk."""
 
     async def fake_iter(*_args: object, **_kwargs: object):  # noqa: ANN202
-        yield b"aa"
-        yield b"bb"
+        yield 0, b"aa"  # (rtp_timestamp, annexb_chunk)
+        yield 6000, b"bb"
 
     written: list[bytes] = []
     out = Mock()

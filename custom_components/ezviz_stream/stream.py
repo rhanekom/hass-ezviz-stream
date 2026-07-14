@@ -285,14 +285,17 @@ async def iter_annexb(
     token_factory: Callable[[], Awaitable[str]],
     *,
     stream: int,
-) -> AsyncIterator[bytes]:
+) -> AsyncIterator[tuple[int, bytes]]:
     """
-    Yield Annex-B HEVC chunks continuously, reconnecting across the ~27 s drop.
+    Yield ``(rtp_timestamp, annexb_chunk)`` continuously, reconnecting across the drop.
 
-    For RTP/HEVC cameras (battery cams) only. Runs until the consumer stops iterating
-    (the driving task is cancelled when no client is watching - battery-friendly).
-    MPEG-PS (encrypted IPC) needs continuous decryption + a remux and is handled
-    separately (C.2b). ``token_factory`` yields a fresh VTDU token per reconnect.
+    The RTP 90 kHz timestamp is the camera's own presentation clock for that access
+    unit; the broadcaster paces playback to it so the VTDU's bursty delivery stays
+    smooth. For RTP/HEVC cameras (battery cams) only. Runs until the consumer stops
+    iterating (the driving task is cancelled when no client is watching -
+    battery-friendly). MPEG-PS (encrypted IPC) needs continuous decryption + a remux
+    and is handled separately (C.2b). ``token_factory`` yields a fresh VTDU token per
+    reconnect.
     """
     while True:
         try:
@@ -324,7 +327,9 @@ async def iter_annexb(
                 if detect_transport(body) == "rtp":
                     chunk = depacketizer.push(body)
                     if chunk:
-                        yield chunk
+                        # RTP 90 kHz timestamp of the packet completing this access
+                        # unit (bytes 4-8 of the RTP header).
+                        yield int.from_bytes(body[4:8], "big"), chunk
         finally:
             writer.close()
             with contextlib.suppress(OSError):
@@ -344,8 +349,9 @@ async def stream_annexb(
 
     Thin wrapper over :func:`iter_annexb` for the standalone CLI producer
     (``producer.py``); the integration itself consumes ``iter_annexb`` in-process via
-    :mod:`broadcast`. Runs until cancelled.
+    :mod:`broadcast`. Runs until cancelled. The RTP timestamp is unused here (the CLI
+    just dumps the bitstream).
     """
-    async for chunk in iter_annexb(camera, token_factory, stream=stream):
+    async for _rtp_ts, chunk in iter_annexb(camera, token_factory, stream=stream):
         out.write(chunk)
         out.flush()

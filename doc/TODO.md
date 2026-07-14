@@ -111,34 +111,37 @@ adds `stream_source()` via that API, so `exec:` can never work through it. Inste
 the `stream` component ffmpeg-opens the same URL for HLS - one path fixes both.
 
 - [x] **C.1 - go2rtc provisioned** in the devcontainer (binary v1.9.14 + Dockerfile).
-- [~] **C.2 - in-process streaming core (RTP/HEVC), live-verified upstream.**
-      `stream.py`: `iter_annexb()` async-generator yields Annex-B HEVC across the ~27 s
-      drop (reconnect + KeepAlive); `stream_annexb()` is now a thin file-like wrapper
-      for the standalone diagnostic `producer.py` (no longer run by go2rtc). The
-      integration consumes `iter_annexb` in-process (no subprocess, no creds file).
-      `tests/test_stream.py` covers the wrapper + frame reader.
+- [x] **C.2 - in-process streaming core (RTP/HEVC), live-verified.**
+      `stream.py`: `iter_annexb()` async-generator yields `(rtp_timestamp, annexb)`
+      across the ~27 s drop (reconnect + KeepAlive); `stream_annexb()` is now a thin
+      file-like wrapper for the standalone diagnostic `producer.py` (no longer run by
+      go2rtc). The integration consumes `iter_annexb` in-process (no subprocess, no
+      creds file). `tests/test_stream.py` covers the wrapper + frame reader.
     - [ ] **C.2b - PS/encrypted (IPC) continuous path.** `mpegts_source` handles
           RTP/HEVC only; encrypted MPEG-PS (IPC) needs incremental decryption before the
           FFmpeg remux (`verification_code` is already threaded through for it).
-- [~] **C.3 - entity + on-demand HTTP broadcaster (go2rtc side validated; needs live
-      HA verification).**
+- [x] **C.3 - entity + on-demand HTTP broadcaster; live-verified (WebRTC up, HLS
+      `Protocol not found` gone, snapshots working).**
     - `broadcast.py`: `mpegts_source()` remuxes a camera's HEVC to MPEG-TS via
-      `ffmpeg -f hevc -i pipe:0 -c copy -f mpegts pipe:1`; `CameraBroadcast` fans one
-      on-demand upstream session out to all subscribers (starts on first, stops on
-      last - battery-friendly), so go2rtc + HLS + snapshots share **one** cloud session
-      (no VTDU 5405/5452 storm).
+      `ffmpeg -use_wallclock_as_timestamps 1 -f hevc -i pipe:0 -c copy -f mpegts`;
+      `CameraBroadcast` fans one on-demand upstream session out to all subscribers
+      (starts on first, stops on last - battery-friendly), so go2rtc + HLS + snapshots
+      share **one** cloud session (no VTDU 5405/5452 storm).
+    - **Playback timing (C.3a, done):** `_Pacer` releases frames into FFmpeg on the
+      camera's own RTP 90 kHz clock (rebasing to now on a reconnect/wrap), so the
+      wall-clock-stamped MPEG-TS follows the real capture cadence - smooth and
+      correct-rate, immune to the VTDU's bursty delivery. (Superseded two earlier
+      guesses: default 25 fps was too fast -> periodic rebuffer; assumed CFR/wallclock
+      alone drifted/jittered -> skip-and-catch-up.)
     - `stream_view.py`: `EzvizStreamMediaView` serves that MPEG-TS at
       `/api/ezviz_stream/<serial>`, guarded by a per-camera random token (constant-time
       compare); registered once in `__init__` (manifest `dependencies` gains `http`).
     - `camera.py`: `stream_source()` returns the token URL; the per-camera creds file
       and `exec:` are gone (account creds now stay in memory only - a security win).
-    - Unit-tested: fan-out + on-demand lifecycle + drop-oldest backpressure
-      (`test_broadcast.py`), view token/404 + streaming (`test_stream_view.py`),
-      stream_source URL + registry lifecycle (`test_camera.py`).
-    - **Validated out-of-HA:** go2rtc 1.9.14 accepts an `http://` MPEG-TS source via
-      its API (the exact two-`src` form HA uses) and re-served HEVC/TS over RTSP.
-      **Live-test in HA:** view a battery cam -> WebRTC via go2rtc, and confirm the HLS
-      `Protocol not found` error is gone.
+    - Unit-tested: fan-out + on-demand lifecycle + drop-oldest backpressure + `_Pacer`
+      scheduling/rebase (`test_broadcast.py`), view token/404 + streaming
+      (`test_stream_view.py`), stream_source URL + registry lifecycle
+      (`test_camera.py`).
     - Known: `mpegts_source` resolves the camera (VTM routing) once per upstream start;
       concurrent multi-camera *live* view opens one cloud session each (snapshot
       concurrency stays capped by `stream_semaphore`) - revisit a live cap in D if it
@@ -146,11 +149,15 @@ the `stream` component ffmpeg-opens the same URL for HLS - one path fixes both.
 
 ### D. Polish
 
-- [ ] Options flow (codec, main/sub stream, **serving mode**, **frame rate**); reauth
-      flow; diagnostics. Frame rate: `broadcast._STREAM_FPS` is hardcoded 15 (main
-      stream); detect from the stream / make per-camera configurable (sub-stream may
-      differ). If a fixed CFR ever drifts from the true rate, escalate to preserving
-      the RTP 90 kHz timestamps through the depacketizer (fully-correct timing).
+- [ ] Options flow (codec, main/sub stream, **serving mode**); reauth flow;
+      diagnostics. (Frame-rate handling is solved by RTP-timestamp pacing - no fps
+      option needed.)
+- [ ] **Battery-cam thumbnail refresh.** Detect battery cameras and give them a
+      slower snapshot refresh cadence than mains/IPC cams (each grab is a full cloud
+      session, and a sleeping battery cam is slow to wake / more likely to return a
+      blank first frame on a busy multi-camera view). Expose an opt-in checkbox in the
+      camera subentry config flow. Ties into the `_SNAPSHOT_CACHE_TTL` / snapshot path
+      in `camera.py`.
 - [ ] **D.x - MJPEG serving mode (opt-in fallback).** An alternative to the default
       WebRTC-via-go2rtc path that needs no go2rtc/`stream` component and sidesteps
       HEVC-in-browser entirely (ffmpeg decodes to JPEG server-side). Override
