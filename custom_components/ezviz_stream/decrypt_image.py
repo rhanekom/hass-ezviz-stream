@@ -28,10 +28,21 @@ class StillImageDecryptError(Exception):
     """A still image carried the marker but could not be decrypted."""
 
 
-def _password_hash(password: str) -> bytes:
-    """Return the double-MD5 (hex) of the password, as the on-wire hash bytes."""
+def password_hash(password: str) -> str:
+    """
+    Return EZVIZ's double-MD5 hex of a verification code.
+
+    This equals the device's ``STATUS.encryptPwd`` (reference A.5) and the hash
+    embedded in an encrypted still image (reference B.10.2), so it validates a
+    verification code without a frame grab.
+    """
     inner = md5(password.encode(), usedforsecurity=False).hexdigest()
-    return md5(inner.encode(), usedforsecurity=False).hexdigest().encode()
+    return md5(inner.encode(), usedforsecurity=False).hexdigest()
+
+
+def _password_hash(password: str) -> bytes:
+    """Return the double-MD5 hex of the password, as the on-wire hash bytes."""
+    return password_hash(password).encode()
 
 
 def _key(password: str) -> bytes:

@@ -28,7 +28,8 @@ _REQUEST_TIMEOUT = 15
 _HTTP_OK = 200
 _LOGIN_PATH = "/v3/users/login/v5"
 _PAGELIST_PATH = (
-    "/v3/userdevices/v1/resources/pagelist?filter=VTM&groupId=-1&limit=50&offset=0"
+    "/v3/userdevices/v1/resources/pagelist"
+    "?filter=VTM,STATUS&groupId=-1&limit=50&offset=0"  # STATUS carries isEncrypt
 )
 # Most recent motion/alarm event (with its stored still image); limit=1 = latest.
 _ALARM_PATH = "/v3/alarms/v2/advanced?queryType=-1&limit=1&stype=-1&deviceSerials="
@@ -90,6 +91,8 @@ class EzvizCamera:
     vtm_ip: str | None = None
     vtm_port: int | None = None
     biz: str = ""  # streamBizUrl query fragment appended to the stream URL
+    is_encrypted: bool = False  # STATUS.isEncrypt - Image Encryption is on
+    encrypt_pwd_hash: str = ""  # STATUS.encryptPwd - double-MD5 of the code (A.5)
 
     @property
     def is_online(self) -> bool:
@@ -207,6 +210,7 @@ class EzvizCloudApi:
         body = await self._get(f"{self._host}{_PAGELIST_PATH}")
 
         vtm_map = _deep_find(body, "VTM") or {}
+        status_map = _deep_find(body, "STATUS") or {}
         dev_infos = {
             di["deviceSerial"]: di
             for di in (_deep_find(body, "deviceInfos") or [])
@@ -219,6 +223,7 @@ class EzvizCloudApi:
                 continue
             vtm = vtm_map.get(resource.get("resourceId")) or {}
             info = dev_infos.get(serial, {})
+            status = status_map.get(serial) or {}
             cameras.append(
                 EzvizCamera(
                     serial=serial,
@@ -230,6 +235,8 @@ class EzvizCloudApi:
                     vtm_ip=vtm.get("externalIp"),
                     vtm_port=int(vtm["port"]) if vtm.get("port") else None,
                     biz=resource.get("streamBizUrl", ""),
+                    is_encrypted=bool(status.get("isEncrypt")),
+                    encrypt_pwd_hash=str(status.get("encryptPwd") or ""),
                 )
             )
         return [cam for cam in cameras if cam.streamable]

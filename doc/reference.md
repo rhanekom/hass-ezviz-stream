@@ -154,14 +154,15 @@ addresses (for P2P/NAT traversal - not used by our TCP path), and push/TTS nodes
 ### A.5 Device discovery (page list)
 
 ```
-GET /v3/userdevices/v1/resources/pagelist?filter=VTM&groupId=-1&limit=50&offset=0
+GET /v3/userdevices/v1/resources/pagelist?filter=VTM,STATUS&groupId=-1&limit=50&offset=0
     (sessionId + client identity as headers/params)
 ```
 
-`filter` selects which sections the reply includes. For streaming we only need
-`VTM`; a fuller client requests many sections (channels, switches, status, wifi,
-capabilities, etc.) and paginates via a `page` block (`offset`, `limit`,
-`totalResults`, `hasNext`), deep-merging pages.
+`filter` selects which sections the reply includes (comma-separated). For streaming
+we need `VTM`; we also request `STATUS` for the encryption flag (below). A fuller
+client requests many more sections (channels, switches, wifi, capabilities, etc.)
+and paginates via a `page` block (`offset`, `limit`, `totalResults`, `hasNext`),
+deep-merging pages.
 
 The reply is a set of **sections, each a map keyed by `resourceId`**. The pieces
 that matter to build a stream:
@@ -176,6 +177,8 @@ that matter to build a stream:
 | `deviceInfos[]` → `channelNumber` | Device channel index (the `chn` URL param). |
 | `deviceInfos[]` → `supportExt` / `ezDeviceCapability` | Capability maps. Encryption support (and ECDH v2 support) is discoverable here - used to decide whether the stream will be encrypted. |
 | `deviceInfos[]` → `status`, `deviceCategory` | Online state; battery-camera classification. |
+| `STATUS[serial]` → `isEncrypt` | Image Encryption on/off (1/0). Requires `STATUS` in the filter. We surface it as `EzvizCamera.is_encrypted` and make the verification code required in the config flow when set. |
+| `STATUS[serial]` → `encryptPwd` | The verification code's **double-MD5 hex** (`md5(md5(code).hex).hex`), the same hash used by the still-image envelope (B.10.2). Lets us validate an entered code without a frame grab. |
 
 ### A.6 VTDU stream token
 

@@ -22,17 +22,21 @@ from custom_components.ezviz_stream.api import (
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_IS_BATTERY,
+    CONF_IS_ENCRYPTED,
     CONF_MAX_SNAPSHOTS,
-    CONF_MOTION_THUMBNAIL,
     CONF_REGION,
     CONF_SERIAL,
     CONF_SNAPSHOT_INTERVAL,
     CONF_STREAM,
+    CONF_THUMBNAIL_MODE,
     CONF_VERIFICATION_CODE,
     DEFAULT_SNAPSHOT_INTERVAL,
     DEFAULT_SNAPSHOT_INTERVAL_BATTERY,
     DOMAIN,
+    THUMBNAIL_INTERVAL,
+    THUMBNAIL_MOTION,
 )
+from custom_components.ezviz_stream.decrypt_image import password_hash
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -178,10 +182,11 @@ async def test_add_camera_subentry(hass: HomeAssistant) -> None:
     assert result["data"] == {
         CONF_SERIAL: "SN1",
         CONF_VERIFICATION_CODE: "ABCDEF",
-        CONF_MOTION_THUMBNAIL: False,  # SN1 is an IPC (mains) cam
+        CONF_THUMBNAIL_MODE: THUMBNAIL_INTERVAL,  # SN1 is an IPC (mains) cam
         CONF_SNAPSHOT_INTERVAL: DEFAULT_SNAPSHOT_INTERVAL,  # mains default
         CONF_STREAM: 1,  # main stream by default
         CONF_IS_BATTERY: False,
+        CONF_IS_ENCRYPTED: False,
     }
 
 
@@ -208,7 +213,7 @@ async def test_add_battery_camera_defaults_to_motion_thumbnail(
         await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"][CONF_MOTION_THUMBNAIL] is True
+    assert result["data"][CONF_THUMBNAIL_MODE] == THUMBNAIL_MOTION
     assert result["data"][CONF_SNAPSHOT_INTERVAL] == DEFAULT_SNAPSHOT_INTERVAL_BATTERY
     assert result["data"][CONF_STREAM] == 2  # battery cams default to the sub stream
     assert result["data"][CONF_IS_BATTERY] is True  # recorded at add time
@@ -245,7 +250,7 @@ async def test_reconfigure_camera_subentry(hass: HomeAssistant) -> None:
                 data={
                     CONF_SERIAL: "SN1",
                     CONF_VERIFICATION_CODE: "OLD",
-                    CONF_MOTION_THUMBNAIL: False,
+                    CONF_THUMBNAIL_MODE: THUMBNAIL_INTERVAL,
                     CONF_SNAPSHOT_INTERVAL: 30,
                     CONF_STREAM: 1,
                 },
@@ -268,7 +273,7 @@ async def test_reconfigure_camera_subentry(hass: HomeAssistant) -> None:
             {
                 CONF_VERIFICATION_CODE: "NEW",
                 "advanced": {
-                    CONF_MOTION_THUMBNAIL: True,
+                    CONF_THUMBNAIL_MODE: THUMBNAIL_MOTION,
                     CONF_SNAPSHOT_INTERVAL: 900,
                     CONF_STREAM: "2",
                 },
@@ -281,11 +286,61 @@ async def test_reconfigure_camera_subentry(hass: HomeAssistant) -> None:
     assert entry.subentries[subentry_id].data == {
         CONF_SERIAL: "SN1",  # unchanged
         CONF_VERIFICATION_CODE: "NEW",
-        CONF_MOTION_THUMBNAIL: True,
+        CONF_THUMBNAIL_MODE: THUMBNAIL_MOTION,
         CONF_SNAPSHOT_INTERVAL: 900,
         CONF_STREAM: 2,  # switched to sub stream
-        CONF_IS_BATTERY: False,  # resolved + backfilled from the account (SN1 is IPC)
+        CONF_IS_BATTERY: False,  # resolved from the account (SN1 is IPC)
+        CONF_IS_ENCRYPTED: False,
     }
+
+
+async def test_encrypted_camera_requires_and_validates_code(
+    hass: HomeAssistant,
+) -> None:
+    """An encrypted camera requires a code; a wrong one is caught before any grab."""
+    entry = _account_entry()
+    entry.add_to_hass(hass)
+    enc = EzvizCamera(
+        "SNE",
+        "Enc cam",
+        "IPC",
+        1,
+        1,
+        streamable=True,
+        is_encrypted=True,
+        encrypt_pwd_hash=password_hash("ABCDEF"),
+    )
+    with _patch_api(cameras=[enc]), _patch_frame_grab(ok=True):
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, CAMERA_SUBENTRY_TYPE), context={"source": SOURCE_USER}
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {CONF_SERIAL: "SNE"}
+        )
+        assert result["step_id"] == "options"
+
+        # Blank code -> required error (no grab).
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {CONF_VERIFICATION_CODE: "", "advanced": {}}
+        )
+        assert result["type"] is FlowResultType.FORM
+        assert result["errors"] == {CONF_VERIFICATION_CODE: "code_required"}
+
+        # Wrong code -> caught by the password hash, still no grab.
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {CONF_VERIFICATION_CODE: "WRONG1", "advanced": {}}
+        )
+        assert result["errors"] == {CONF_VERIFICATION_CODE: "invalid_code"}
+
+        # Correct code -> validates and saves.
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {CONF_VERIFICATION_CODE: "ABCDEF", "advanced": {}}
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_IS_ENCRYPTED] is True
+    assert result["data"][CONF_VERIFICATION_CODE] == "ABCDEF"
 
 
 async def test_add_camera_frame_check_fails_then_save_anyway(

@@ -18,14 +18,16 @@ from custom_components.ezviz_stream.camera import EzvizStreamCamera
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_IS_BATTERY,
-    CONF_MOTION_THUMBNAIL,
     CONF_REGION,
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
     CONF_SNAPSHOT_INTERVAL,
+    CONF_THUMBNAIL_MODE,
     CONF_VERIFICATION_CODE,
     DOMAIN,
     OFFICIAL_EZVIZ_DOMAIN,
+    THUMBNAIL_MOTION,
+    THUMBNAIL_STATIC,
 )
 from custom_components.ezviz_stream.stream_view import DATA_STREAMS
 
@@ -280,7 +282,7 @@ async def test_motion_thumbnail_uses_alarm_image(hass: HomeAssistant) -> None:
         data={
             CONF_SERIAL: "SN1",
             CONF_VERIFICATION_CODE: "ABCDEF",
-            CONF_MOTION_THUMBNAIL: True,
+            CONF_THUMBNAIL_MODE: THUMBNAIL_MOTION,
         },
         title="Cam",
         subentry_id="x",
@@ -312,7 +314,7 @@ async def test_motion_thumbnail_seeds_with_live_grab(hass: HomeAssistant) -> Non
         data={
             CONF_SERIAL: "SN1",
             CONF_VERIFICATION_CODE: "",
-            CONF_MOTION_THUMBNAIL: True,
+            CONF_THUMBNAIL_MODE: THUMBNAIL_MOTION,
         },
         title="Cam",
         subentry_id="x",
@@ -334,6 +336,49 @@ async def test_motion_thumbnail_seeds_with_live_grab(hass: HomeAssistant) -> Non
 
     assert image == b"SEED" * 100
     grab.assert_awaited_once()  # seeded via one live grab when no motion image
+
+
+async def test_static_thumbnail_grabbed_once_then_frozen(
+    hass: HomeAssistant,
+) -> None:
+    """Static mode grabs one live frame, then never refreshes (infinite TTL)."""
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(
+        return_value=[EzvizCamera("SN1", "Cam", "IPC", 1, 1, streamable=True)]
+    )
+    entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(api=api, snapshot_semaphore=asyncio.Semaphore(1))
+    )
+    subentry = SimpleNamespace(
+        data={
+            CONF_SERIAL: "SN1",
+            CONF_VERIFICATION_CODE: "",
+            CONF_THUMBNAIL_MODE: THUMBNAIL_STATIC,
+        },
+        title="Cam",
+        subentry_id="x",
+    )
+    camera = EzvizStreamCamera(entry, subentry)
+    camera.hass = hass
+    assert camera._cache_ttl == float("inf")  # never goes stale
+
+    with (
+        patch(
+            "custom_components.ezviz_stream.camera.grab_jpeg",
+            AsyncMock(return_value=b"STATIC" * 100),
+        ) as grab,
+        patch(
+            "custom_components.ezviz_stream.camera.get_ffmpeg_manager",
+            return_value=SimpleNamespace(binary="ffmpeg"),
+        ),
+    ):
+        first = await camera.async_camera_image()
+        await hass.async_block_till_done()
+        second = await camera.async_camera_image()
+
+    assert first == b"STATIC" * 100
+    assert second == first
+    grab.assert_awaited_once()  # captured once, never refreshed
 
 
 async def test_snapshot_persisted_and_restored_across_restart(

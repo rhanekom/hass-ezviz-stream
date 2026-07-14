@@ -47,6 +47,7 @@ _PAGELIST = {
         }
     ],
     "VTM": {"R1": {"externalIp": "10.0.0.1", "port": "6001"}},
+    "STATUS": {"SN1": {"isEncrypt": 1, "encryptPwd": "deadbeefhash"}},
 }
 
 
@@ -81,6 +82,8 @@ async def test_login_success_and_cameras() -> None:
     assert cam.vtm_port == 6001
     assert cam.biz == "biz=1"
     assert cam.is_online
+    assert cam.is_encrypted is True  # from STATUS.isEncrypt
+    assert cam.encrypt_pwd_hash == "deadbeefhash"  # noqa: S105 - a hash, not a secret
 
 
 @pytest.mark.parametrize(

@@ -23,12 +23,16 @@ from .const import (
     CONF_SLOW_THUMBNAILS,
     CONF_SNAPSHOT_INTERVAL,
     CONF_STREAM,
+    CONF_THUMBNAIL_MODE,
     CONF_VERIFICATION_CODE,
     DEFAULT_SNAPSHOT_INTERVAL,
     DEFAULT_SNAPSHOT_INTERVAL_BATTERY,
     DEFAULT_STREAM,
     MANUFACTURER,
     OFFICIAL_EZVIZ_DOMAIN,
+    THUMBNAIL_INTERVAL,
+    THUMBNAIL_MOTION,
+    THUMBNAIL_STATIC,
 )
 from .stream import grab_jpeg
 from .stream_view import register_stream, unregister_stream
@@ -64,6 +68,14 @@ def _resolve_interval(data: dict[str, object]) -> float:
     if data.get(CONF_SLOW_THUMBNAILS):
         return float(DEFAULT_SNAPSHOT_INTERVAL_BATTERY)
     return float(DEFAULT_SNAPSHOT_INTERVAL)
+
+
+def _resolve_thumbnail_mode(data: dict[str, object]) -> str:
+    """Resolve the thumbnail source, mapping the legacy boolean when needed."""
+    if mode := data.get(CONF_THUMBNAIL_MODE):
+        return str(mode)
+    # Legacy subentries predate the mode select: map the old boolean flag.
+    return THUMBNAIL_MOTION if data.get(CONF_MOTION_THUMBNAIL) else THUMBNAIL_INTERVAL
 
 
 def _write_snapshot(path: Path, data: bytes) -> None:
@@ -115,7 +127,7 @@ class EzvizStreamCamera(Camera):
         self._entry = entry
         self._serial: str = subentry.data[CONF_SERIAL]
         self._verification_code: str = subentry.data.get(CONF_VERIFICATION_CODE, "")
-        self._motion_thumbnail: bool = subentry.data.get(CONF_MOTION_THUMBNAIL, False)
+        self._thumbnail_mode: str = _resolve_thumbnail_mode(subentry.data)
         self._snapshot_interval: float = _resolve_interval(subentry.data)
         self._stream_index: int = subentry.data.get(CONF_STREAM, DEFAULT_STREAM)
         # None until known (cameras added before this was recorded resolve it once).
@@ -156,6 +168,8 @@ class EzvizStreamCamera(Camera):
     @property
     def _cache_ttl(self) -> float:
         """How long a cached frame stays fresh (the per-camera refresh interval)."""
+        if self._thumbnail_mode == THUMBNAIL_STATIC:
+            return float("inf")  # captured once, then never revalidated
         return self._snapshot_interval
 
     @property
@@ -275,14 +289,15 @@ class EzvizStreamCamera(Camera):
 
     async def _async_grab_into_cache(self) -> None:
         """Refresh the in-memory + on-disk cache with a new frame (holds the lock)."""
-        if self._motion_thumbnail:
+        if self._thumbnail_mode == THUMBNAIL_MOTION:
             jpeg = await self._async_fetch_motion_image()
-            # Seed once: if there is no stored motion image yet and nothing cached,
-            # do a single live grab so the tile is not blank; later refreshes stay
-            # on the (no-wake) motion image.
+            # If the motion image is blank and nothing is cached yet, seed the tile
+            # with a single live grab; later refreshes stay on the (no-wake) image.
             if jpeg is None and self._image is None:
                 jpeg = await self._async_grab_live()
         else:
+            # interval + static both grab a live frame; static just never
+            # revalidates afterwards (its cache TTL is infinite).
             jpeg = await self._async_grab_live()
 
         if jpeg is not None:

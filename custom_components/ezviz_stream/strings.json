@@ -59,7 +59,7 @@
         },
         "options": {
           "title": "Camera options",
-          "description": "Configure {camera}. **Battery camera: {battery}.** If it has Image Encryption enabled, enter its verification code (the 6-character code on the camera label); leave blank otherwise. Saving grabs a frame to check the settings.{camera_note}",
+          "description": "Configure **{camera}**\n\n- Serial: {serial}\n- Battery camera: {battery}\n- Image Encryption: {encrypted}\n\nEnter the verification code (the 6-character code on the camera label) if Image Encryption is on; leave blank otherwise. Saving grabs a frame to check the settings.{camera_note}",
           "data": {
             "verification_code": "Verification code (encryption password)"
           },
@@ -67,20 +67,20 @@
             "advanced": {
               "name": "Advanced",
               "data": {
-                "motion_thumbnail": "Use last motion image as thumbnail (recommended for battery cameras)",
+                "thumbnail_mode": "Thumbnail source",
                 "snapshot_interval": "Thumbnail refresh interval (seconds)",
                 "stream": "Video stream"
               },
               "data_description": {
-                "motion_thumbnail": "Show the camera's most recent cloud motion snapshot instead of grabbing a live frame, so a battery camera is never woken just to fill a thumbnail.",
-                "snapshot_interval": "How often a thumbnail that is being viewed refreshes. A longer interval wakes battery cameras less often (only applies when the motion image is off)."
+                "thumbnail_mode": "How the camera tile is filled. Live snapshot refreshes on the interval below and wakes battery cameras. Latest motion image uses the most recent cloud motion snapshot with no wake (best for battery). Static image is captured once and never refreshed.",
+                "snapshot_interval": "How often a viewed thumbnail refreshes. A longer interval wakes battery cameras less often. Applies to the live snapshot and motion-image sources, not the static image."
               }
             }
           }
         },
         "reconfigure": {
           "title": "Camera options",
-          "description": "Update {camera}. **Battery camera: {battery}.** If it has Image Encryption enabled, enter its verification code (the 6-character code on the camera label); leave blank otherwise. Saving grabs a frame to check the settings.",
+          "description": "Update **{camera}**\n\n- Serial: {serial}\n- Battery camera: {battery}\n- Image Encryption: {encrypted}\n\nEnter the verification code (the 6-character code on the camera label) if Image Encryption is on; leave blank otherwise. Saving grabs a frame to check the settings.",
           "data": {
             "verification_code": "Verification code (encryption password)"
           },
@@ -88,13 +88,13 @@
             "advanced": {
               "name": "Advanced",
               "data": {
-                "motion_thumbnail": "Use last motion image as thumbnail (recommended for battery cameras)",
+                "thumbnail_mode": "Thumbnail source",
                 "snapshot_interval": "Thumbnail refresh interval (seconds)",
                 "stream": "Video stream"
               },
               "data_description": {
-                "motion_thumbnail": "Show the camera's most recent cloud motion snapshot instead of grabbing a live frame, so a battery camera is never woken just to fill a thumbnail.",
-                "snapshot_interval": "How often a thumbnail that is being viewed refreshes. A longer interval wakes battery cameras less often (only applies when the motion image is off)."
+                "thumbnail_mode": "How the camera tile is filled. Live snapshot refreshes on the interval below and wakes battery cameras. Latest motion image uses the most recent cloud motion snapshot with no wake (best for battery). Static image is captured once and never refreshed.",
+                "snapshot_interval": "How often a viewed thumbnail refreshes. A longer interval wakes battery cameras less often. Applies to the live snapshot and motion-image sources, not the static image."
               }
             }
           }
@@ -107,6 +107,10 @@
             "save_anyway": "Save anyway"
           }
         }
+      },
+      "error": {
+        "code_required": "This camera has Image Encryption enabled - a verification code is required.",
+        "invalid_code": "That verification code does not match this camera. Check the 6-character code on the label."
       },
       "abort": {
         "no_cameras": "All streamable cameras on this account have already been added.",

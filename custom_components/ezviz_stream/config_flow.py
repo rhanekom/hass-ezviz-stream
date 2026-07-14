@@ -26,7 +26,6 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import section
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
-    BooleanSelector,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -50,6 +49,7 @@ from .api import (
 from .const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_IS_BATTERY,
+    CONF_IS_ENCRYPTED,
     CONF_MAX_SNAPSHOTS,
     CONF_MOTION_THUMBNAIL,
     CONF_REGION,
@@ -57,6 +57,7 @@ from .const import (
     CONF_SLOW_THUMBNAILS,
     CONF_SNAPSHOT_INTERVAL,
     CONF_STREAM,
+    CONF_THUMBNAIL_MODE,
     CONF_VERIFICATION_CODE,
     DEFAULT_MAX_SNAPSHOTS,
     DEFAULT_REGION,
@@ -70,7 +71,11 @@ from .const import (
     MIN_SNAPSHOT_INTERVAL,
     REGION_API_CODES,
     SUB_STREAM,
+    THUMBNAIL_INTERVAL,
+    THUMBNAIL_MOTION,
+    THUMBNAIL_STATIC,
 )
+from .decrypt_image import password_hash
 from .stream import grab_jpeg
 
 if TYPE_CHECKING:
@@ -94,28 +99,48 @@ _VERIFY_MAX_SESSIONS = 3
 def _camera_options_schema(
     *,
     verification_code: str,
-    motion_thumbnail: bool,
+    code_required: bool,
+    thumbnail_mode: str,
     snapshot_interval: int,
     stream: int,
 ) -> vol.Schema:
     """
     Build the schema for a camera's editable settings (add + reconfigure).
 
-    Only the verification code is shown up front; the motion-thumbnail toggle,
-    refresh interval, and stream (all with sensible defaults) live in a collapsed
-    'advanced' section.
+    Only the verification code is shown up front (required when the device has Image
+    Encryption on); the thumbnail source, refresh interval, and stream (all with
+    sensible defaults) live in a collapsed 'advanced' section.
     """
+    code_key = vol.Required if code_required else vol.Optional
     return vol.Schema(
         {
-            vol.Optional(
-                CONF_VERIFICATION_CODE, default=verification_code
-            ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+            code_key(CONF_VERIFICATION_CODE, default=verification_code): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.PASSWORD)
+            ),
             vol.Required(_ADVANCED): section(
                 vol.Schema(
                     {
                         vol.Required(
-                            CONF_MOTION_THUMBNAIL, default=motion_thumbnail
-                        ): BooleanSelector(),
+                            CONF_THUMBNAIL_MODE, default=thumbnail_mode
+                        ): SelectSelector(
+                            SelectSelectorConfig(
+                                options=[
+                                    SelectOptionDict(
+                                        value=THUMBNAIL_INTERVAL,
+                                        label="Live snapshot (refreshed on a schedule)",
+                                    ),
+                                    SelectOptionDict(
+                                        value=THUMBNAIL_MOTION,
+                                        label="Latest motion image (no camera wake)",
+                                    ),
+                                    SelectOptionDict(
+                                        value=THUMBNAIL_STATIC,
+                                        label="Static image (captured once)",
+                                    ),
+                                ],
+                                mode=SelectSelectorMode.DROPDOWN,
+                            )
+                        ),
                         vol.Required(
                             CONF_SNAPSHOT_INTERVAL, default=snapshot_interval
                         ): NumberSelector(
@@ -173,13 +198,17 @@ def _camera_note(*, is_battery: bool) -> str:
 
 
 def _camera_subentry_data(
-    serial: str, user_input: dict[str, Any], *, is_battery: bool | None
+    serial: str,
+    user_input: dict[str, Any],
+    *,
+    is_battery: bool | None,
+    is_encrypted: bool | None,
 ) -> dict[str, Any]:
     """Build the subentry data dict from a flattened options/reconfigure form."""
     data = {
         CONF_SERIAL: serial,
         CONF_VERIFICATION_CODE: user_input.get(CONF_VERIFICATION_CODE, ""),
-        CONF_MOTION_THUMBNAIL: user_input.get(CONF_MOTION_THUMBNAIL, False),
+        CONF_THUMBNAIL_MODE: user_input.get(CONF_THUMBNAIL_MODE, THUMBNAIL_INTERVAL),
         CONF_SNAPSHOT_INTERVAL: int(
             user_input.get(CONF_SNAPSHOT_INTERVAL, DEFAULT_SNAPSHOT_INTERVAL)
         ),
@@ -187,14 +216,31 @@ def _camera_subentry_data(
     }
     if is_battery is not None:  # omit when unknown rather than store a null
         data[CONF_IS_BATTERY] = is_battery
+    if is_encrypted is not None:
+        data[CONF_IS_ENCRYPTED] = is_encrypted
     return data
 
 
 def _yes_no(value: bool | None) -> str:  # noqa: FBT001 - simple display formatter
-    """Format a tri-state battery flag for display in the config flow."""
+    """Format a tri-state yes/no flag for display in the config flow."""
     if value is None:
         return "Unknown"
     return "Yes" if value else "No"
+
+
+def _code_error(code: str, *, is_encrypted: bool | None, pwd_hash: str) -> str | None:
+    """
+    Validate a verification code before the (slow) frame grab.
+
+    Returns an error key, or None if the code is acceptable: it is required when the
+    device has Image Encryption on, and - when the device exposes its password hash
+    (STATUS.encryptPwd) - it must match, so a wrong code is caught without a grab.
+    """
+    if is_encrypted and not code:
+        return "code_required"
+    if pwd_hash and code and password_hash(code) != pwd_hash:
+        return "invalid_code"
+    return None
 
 
 def _stored_interval(data: Mapping[str, Any]) -> int:
@@ -415,22 +461,34 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
     async def async_step_options(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Supply the verification code, thumbnail cadence, and stream for a new cam."""
+        """Supply the verification code, thumbnail source, and stream for a new cam."""
         camera = self._camera
         assert camera is not None  # noqa: S101 - set by async_step_user before we get here
+        errors: dict[str, str] = {}
 
         if user_input is not None:
-            data = _camera_subentry_data(
-                camera.serial,
-                _flatten_options(user_input),
-                is_battery=camera.is_battery,
+            flat = _flatten_options(user_input)
+            code = flat.get(CONF_VERIFICATION_CODE, "")
+            error = _code_error(
+                code,
+                is_encrypted=camera.is_encrypted,
+                pwd_hash=camera.encrypt_pwd_hash,
             )
-            if await self._async_frame_ok(data):
-                return self.async_create_entry(
-                    title=camera.label, unique_id=camera.serial, data=data
+            if error:
+                errors[CONF_VERIFICATION_CODE] = error
+            else:
+                data = _camera_subentry_data(
+                    camera.serial,
+                    flat,
+                    is_battery=camera.is_battery,
+                    is_encrypted=camera.is_encrypted,
                 )
-            self._pending_data, self._pending_subentry = data, None
-            return await self.async_step_verify_failed()
+                if await self._async_frame_ok(data):
+                    return self.async_create_entry(
+                        title=camera.label, unique_id=camera.serial, data=data
+                    )
+                self._pending_data, self._pending_subentry = data, None
+                return await self.async_step_verify_failed()
 
         # Battery cams default to the motion thumbnail (never woken for a tile), a
         # long refresh interval, and the lower-bandwidth sub stream; all overridable.
@@ -439,7 +497,8 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
             step_id="options",
             data_schema=_camera_options_schema(
                 verification_code="",
-                motion_thumbnail=battery,
+                code_required=camera.is_encrypted,
+                thumbnail_mode=THUMBNAIL_MOTION if battery else THUMBNAIL_INTERVAL,
                 snapshot_interval=(
                     DEFAULT_SNAPSHOT_INTERVAL_BATTERY
                     if battery
@@ -447,9 +506,12 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
                 ),
                 stream=SUB_STREAM if battery else DEFAULT_STREAM,
             ),
+            errors=errors,
             description_placeholders={
                 "camera": camera.label,
+                "serial": camera.serial,
                 "battery": _yes_no(camera.is_battery),
+                "encrypted": _yes_no(camera.is_encrypted),
                 "camera_note": _camera_note(is_battery=camera.is_battery),
             },
         )
@@ -457,48 +519,70 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Edit an already-added camera's verification code, cadence, and stream."""
+        """Edit an already-added camera's verification code, thumbnail, and stream."""
         subentry = self._get_reconfigure_subentry()
-        is_battery = await self._async_resolve_is_battery(subentry)
+        camera = await self._async_lookup_camera(subentry)
+        is_battery = camera.is_battery if camera else subentry.data.get(CONF_IS_BATTERY)
+        is_encrypted = (
+            camera.is_encrypted if camera else subentry.data.get(CONF_IS_ENCRYPTED)
+        )
+        pwd_hash = camera.encrypt_pwd_hash if camera else ""
+        errors: dict[str, str] = {}
+
         if user_input is not None:
-            data = _camera_subentry_data(
-                subentry.data[CONF_SERIAL],
-                _flatten_options(user_input),
-                is_battery=is_battery,
-            )
-            if await self._async_frame_ok(data):
-                return self.async_update_and_abort(
-                    self._get_entry(), subentry, data=data
+            flat = _flatten_options(user_input)
+            code = flat.get(CONF_VERIFICATION_CODE, "")
+            error = _code_error(code, is_encrypted=is_encrypted, pwd_hash=pwd_hash)
+            if error:
+                errors[CONF_VERIFICATION_CODE] = error
+            else:
+                data = _camera_subentry_data(
+                    subentry.data[CONF_SERIAL],
+                    flat,
+                    is_battery=is_battery,
+                    is_encrypted=is_encrypted,
                 )
-            self._pending_data, self._pending_subentry = data, subentry
-            return await self.async_step_verify_failed()
+                if await self._async_frame_ok(data):
+                    return self.async_update_and_abort(
+                        self._get_entry(), subentry, data=data
+                    )
+                self._pending_data, self._pending_subentry = data, subentry
+                return await self.async_step_verify_failed()
 
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=_camera_options_schema(
                 verification_code=subentry.data.get(CONF_VERIFICATION_CODE, ""),
-                motion_thumbnail=subentry.data.get(CONF_MOTION_THUMBNAIL, False),
+                code_required=bool(is_encrypted),
+                thumbnail_mode=subentry.data.get(CONF_THUMBNAIL_MODE)
+                or (
+                    THUMBNAIL_MOTION
+                    if subentry.data.get(CONF_MOTION_THUMBNAIL)
+                    else THUMBNAIL_INTERVAL
+                ),
                 snapshot_interval=_stored_interval(subentry.data),
                 stream=subentry.data.get(CONF_STREAM, DEFAULT_STREAM),
             ),
+            errors=errors,
             description_placeholders={
                 "camera": subentry.title,
+                "serial": subentry.data[CONF_SERIAL],
                 "battery": _yes_no(is_battery),
+                "encrypted": _yes_no(is_encrypted),
             },
         )
 
-    async def _async_resolve_is_battery(self, subentry: ConfigSubentry) -> bool | None:
-        """Return the cached battery flag, else look it up from the account once."""
-        if CONF_IS_BATTERY in subentry.data:
-            return bool(subentry.data[CONF_IS_BATTERY])
+    async def _async_lookup_camera(
+        self, subentry: ConfigSubentry
+    ) -> EzvizCamera | None:
+        """Find this subentry's camera on the account (None if unreachable)."""
         try:
             cameras = await self._async_account_cameras(self._get_entry())
         except CannotConnect, InvalidAuth, MfaRequired:
             return None
-        camera = next(
+        return next(
             (c for c in cameras if c.serial == subentry.data[CONF_SERIAL]), None
         )
-        return camera.is_battery if camera is not None else None
 
     async def async_step_verify_failed(
         self,

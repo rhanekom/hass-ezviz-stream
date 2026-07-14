@@ -28,6 +28,9 @@ CONF_VERIFICATION_CODE: Final = "verification_code"
 # entity and in the config flow. Stored so it needs no repeated cloud lookup; the
 # entity self-resolves it once for cameras added before this was recorded.
 CONF_IS_BATTERY: Final = "is_battery"
+# Cached at add time: does the device have Image Encryption on (STATUS.isEncrypt)?
+# When set, the verification code becomes required in the config flow.
+CONF_IS_ENCRYPTED: Final = "is_encrypted"
 # Deprecated boolean cadence flag (kept only so subentries created before the
 # explicit interval landed still map to a sensible TTL on read). Superseded by
 # CONF_SNAPSHOT_INTERVAL; no longer written by the config flow.
@@ -41,9 +44,16 @@ DEFAULT_SNAPSHOT_INTERVAL: Final = 30
 DEFAULT_SNAPSHOT_INTERVAL_BATTERY: Final = 600
 MIN_SNAPSHOT_INTERVAL: Final = 15
 MAX_SNAPSHOT_INTERVAL: Final = 21600  # 6 h - for battery cams woken very rarely
-# Use the last cloud motion/alarm image as the thumbnail instead of a live grab, so a
-# battery camera is never woken just to fill a tile (reference A.8.1). Defaults on for
-# battery cameras. The still-image payload may be encrypted (reference B.10.2).
+# How the camera tile is filled. Superseded the CONF_MOTION_THUMBNAIL boolean:
+#   interval - a live snapshot refreshed every CONF_SNAPSHOT_INTERVAL (wakes battery
+#              cams); motion - the latest cloud motion image, no wake (reference
+#              A.8.1); static - grabbed once then frozen.
+CONF_THUMBNAIL_MODE: Final = "thumbnail_mode"
+THUMBNAIL_INTERVAL: Final = "interval"
+THUMBNAIL_MOTION: Final = "motion"
+THUMBNAIL_STATIC: Final = "static"
+# Deprecated boolean (True -> motion, False -> interval); read only for subentries
+# created before CONF_THUMBNAIL_MODE. No longer written by the config flow.
 CONF_MOTION_THUMBNAIL: Final = "motion_thumbnail"
 # Marker prefix of an encrypted still image (alarm snapshot); see reference B.10.2.
 HIK_ENCRYPTION_HEADER: Final = b"hikencodepicture"
