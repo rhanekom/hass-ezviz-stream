@@ -505,10 +505,11 @@ append their payload (from byte 3). On the end fragment, flush the completed NAL
   config option for Safari/iOS clients. MPEG-PS input can be handed to FFmpeg more
   directly.
 
-### B.10 Encryption (out of scope for v1)
+### B.10 Encryption
 
-Two independent layers exist; both are documented here for completeness but
-**neither is required when image encryption is off** (channel `0x01`).
+Two independent layers exist. The **payload (Image Encryption)** layer is
+**implemented** (see layer 2); the **transport E2EE** layer is documented for
+completeness but is not implemented and is not needed for the cameras we support.
 
 1. **Transport E2EE (link to VTM/VTDU).** Present when the device advertises ECDH
    support. Uses **ECDHE on curve P-256 (secp256r1/prime256v1)**: we generate an
@@ -519,9 +520,10 @@ Two independent layers exist; both are documented here for completeness but
 2. **Payload encryption (the "image/video encryption" password).** Believed to be
    **AES-128**. The related still-image scheme is known: a marker header plus a
    double-MD5 of the password, discard a 48-byte head, then AES-CBC with a static
-   IV and PKCS5 unpadding. Whether video reuses that (static IV, whole-blob) or a
-   proper SRTP-style per-session negotiated IV (CTR mode keyed by the RTP
-   sequence) is **not yet confirmed**. StreamInfoRsp exposes `datakey` and
+   IV and PKCS5 unpadding. Whether video reused the still-image scheme was originally unconfirmed; our
+   implementation (`decrypt.py`) **confirms** it for **MPEG-PS video**: the first
+   4096 bytes of each video NAL body are **AES-ECB** with the verification code
+   zero-padded to 16 bytes (no IV), and the media stays on channel `0x01`. StreamInfoRsp exposes `datakey` and
    `aesmd5` that likely bind/verify the AES key; devices also expose a
    "permanent key" thought to derive (not be) the stream key.
 

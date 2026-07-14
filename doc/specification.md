@@ -9,14 +9,15 @@ solution, not from scratch.
 
 > Status (2026-07-11): **decode proven end-to-end** on an EZVIZ **CB3** battery
 > cam. Pulled H.265 from the cloud, de-packetized to a clean HEVC elementary
-> stream, decoded with FFmpeg → **2304×1296 @ ~15 fps**. Only the "serve it to
-> HA" last mile remains. Original investigation + working scripts lived in a
+> stream, decoded with FFmpeg → **2304×1296 @ ~15 fps**. It now streams live in Home Assistant. Original investigation + working scripts lived in a
 > throwaway scratchpad; the essential logic is reproduced below.
 
-> **Decisions taken (2026-07-12):**
+> **Decisions as built (2026-07-14; some reversed from the original plan):**
 >
-> - **Auth layer:** depend on `RenierM26/pyEzvizApi` (manifest requirement) for
->   login / device list / VTDU tokens; implement only the VTM/VTDU handshake here.
+> - **Auth layer:** **hand-rolled, no runtime dependency on `pyEzvizApi`.** HA core
+>   pins an incompatible `pyezvizapi` for the official integration and one environment
+>   cannot satisfy both, so we implement login, discovery, the VTDU token, and the
+>   VTM/VTDU handshake ourselves; `pyEzvizApi` stays a dev-only decryption test oracle.
 > - **Target cameras:** **both battery *and* mains-powered ("normal") cameras.**
 >   The battery models drove this project (no local RTSP), but the same cloud path
 >   serves normal cams too, so v1 supports both.
@@ -26,21 +27,23 @@ solution, not from scratch.
 >   bytes and branches** (see §4 / `reference.md` B.7). This is the single biggest
 >   portability risk, and - with normal cams now in scope - an explicit v1 concern,
 >   not a footnote.
-> - **Codec:** default to on-demand HEVC→H.264 transcode; native HEVC as a config
->   option (see §6.1).
-> - **Encryption:** require Image Encryption **OFF** for v1 (unencrypted channels
->   `0x00`/`0x01`); the encrypted `0x0a`/`0x0b` path is out of scope for v1.
+> - **Codec:** go2rtc transcodes HEVC→H.264 for the browser (WebRTC) automatically;
+>   our FFmpeg only remuxes to MPEG-TS (stream copy). A native-HEVC codec option is
+>   deferred (see §6.1).
+> - **Encryption: supported.** We ship our own AES-ECB Image-Encryption decryptor (a
+>   one-shot form plus an incremental streaming variant for continuous IPC live),
+>   validated byte-for-byte against `pyEzvizApi`.
 > - **2FA:** must be **disabled** on the EZVIZ account for v1 - same stance as the
 >   official `ezviz` integration (see §7).
-> - **Serving path (§6):** **decided - option A, go2rtc `exec:` source.** HA bundles
->   go2rtc, which gives us on-demand process start/stop (the core battery
->   requirement) and WebRTC/HLS/RTSP fan-out for free. Option B (standalone add-on)
->   is kept only as a documented fallback for installs go2rtc can't serve.
-> - **Transcoding:** **no separate container.** The HEVC→H.264 FFmpeg transcode
->   runs *inside* the go2rtc `exec:` pipeline; go2rtc is the process manager. A
->   dedicated add-on/container was rejected - it duplicates go2rtc and costs
->   portability (add-ons require HA OS / Supervised; a `custom_component` works on
->   all install types).
+> - **Serving path (§6): a local, token-guarded HTTP MPEG-TS view that go2rtc pulls.**
+>   HA-managed go2rtc rejects `exec:` via its API and restricts config `exec:` to the
+>   `ffmpeg` binary, so `stream_source()` returns an `http://` URL. One on-demand cloud
+>   session per camera is fanned out to go2rtc (WebRTC), the HLS `stream` component,
+>   and snapshots.
+> - **Transcoding:** **no separate container.** go2rtc does the HEVC→H.264
+>   transcode for WebRTC; we run FFmpeg only for the cheap MPEG-TS remux. A dedicated
+>   add-on/container was rejected - it costs portability (add-ons require HA OS /
+>   Supervised; a `custom_component` works on all install types).
 > - **Coupling to the official `ezviz` integration:** **soft, not a dependency.**
 >   We ship our own config flow + credentials (§3, §7) and stand alone. We link our
 >   camera entity to the *same device* as the official integration via a matching
@@ -76,16 +79,17 @@ EZVIZ account login (HTTPS)                     # api<region>.ezvizlife.com
   → detect transport (RTP / MPEG-PS / TS)         # varies by model (§4)
   → RTP: RFC-7798 de-packetize → Annex-B HEVC     # <-- the key decode (RTP models)
   → PS/TS: hand to FFmpeg demuxer                  # older/battery models
-  → FFmpeg → HLS/RTSP/(optional H.264 transcode) → HA camera
+  → FFmpeg remux → MPEG-TS → token-guarded HTTP view → go2rtc → WebRTC (HA camera)
 ```
 
 ## 3. Authentication + stream handshake (control plane)
 
-All of this is already implemented in two community projects - **reuse, don't
-rewrite**:
+The control plane and handshake are documented by two community projects, which we
+used as **protocol references** - the integration implements all of it itself and
+takes no runtime dependency on either (see the decisions block and §8):
 
-- **`RenierM26/pyEzvizApi`** - maintained EZVIZ cloud auth/API lib (login,
-  device list, tokens). Best base for the auth layer.
+- **`RenierM26/pyEzvizApi`** - maintained EZVIZ cloud auth/API library (login,
+  device list, tokens); reference for the auth/API shapes.
 - **`ESJavadex/ezviz-ha-addon`** (`ezviz-camera/ezviz_stream.py`) - a compact,
   dependency-light (`requests` only) implementation of the *whole* control plane
   **plus** the VTM/VTDU socket handshake. This is the clearest reference for the
@@ -169,11 +173,13 @@ RTP packet carrying H.265 (RFC 7798)**:
   the stream is mostly FU fragments plus periodic VPS/SPS/PPS.
 - **Non-video RTP is present too** - e.g. `PT=112` packets with the extension
   bit set carry metadata/codec info; **skip anything where `PT != 96`.**
-- **Encryption:** with the camera's **Image Encryption OFF**, the media is on
-  channel `0x01` (unencrypted) and needs no key work. With it **ON**, media
-  moves to channel `0x0b` and requires key derivation - see
-  `LethalEthan/LE-EZVIZ-VS` (`encryption.md`, `protocol.md`, `codecs.md`) for
-  that path. **Recommend: require encryption OFF for v1.**
+- **Encryption: supported (Image Encryption).** In practice, IPC cameras with Image
+  Encryption on still deliver **MPEG-PS** video on channel `0x01`, with the first
+  4096 bytes of each video NAL body **AES-ECB** encrypted using the per-camera
+  verification code (zero-padded to 16 bytes). `decrypt.py` reverses this (§4.1 /
+  `reference.md` B.10), so encrypted IPC cams work. The separate **transport E2EE**
+  path (ECDH on `0x0A`/`0x0B`, `LethalEthan/LE-EZVIZ-VS`) is not implemented and not
+  needed for these cameras.
 
 ### 4.1 De-packetizer (proven working)
 
@@ -258,30 +264,32 @@ Verify with: `ffprobe -f hevc deck.h265` and
 
 ## 6. Extension architecture
 
-**Decision: a HACS `custom_component` that registers a go2rtc `exec:` source
-(option A). No separate transcoding container.** Rationale: HA bundles go2rtc
-(default since 2024.11), and its `exec:` source model hands us the two things this
-project most needs - **on-demand process start/stop** and **WebRTC/HLS/RTSP
-fan-out** - for free. A standalone add-on (option B) would have to reimplement
-start/stop itself and only runs on HA OS / Supervised, so it is kept as a fallback
-only (§6.2).
+**Decision: a HACS `custom_component` that serves each camera as a local,
+token-guarded HTTP MPEG-TS stream which the bundled go2rtc pulls.** HA-managed go2rtc
+will not run a go2rtc `exec:` source (it rejects `exec:` via its API as an insecure
+producer, and its config allow-lists only the `ffmpeg` binary), so the originally
+planned `exec:` approach was dropped. Instead the integration streams the camera
+in-process, remuxes to MPEG-TS with FFmpeg, and exposes it from a Home Assistant HTTP
+view; `stream_source()` returns that `http://` URL, which go2rtc pulls and fans out to
+WebRTC/HLS. This keeps on-demand start/stop and browser transcoding with no subprocess
+and no separate container.
 
-**A. go2rtc-backed (chosen).**
+**How it works (as built).**
 
-- A small Python producer: `login → handshake → depacketize → write Annex-B
-  HEVC to stdout`, wrapped by FFmpeg (HEVC→H.264 transcode by default, §6.1) to
-  MPEG-TS.
-- Register it as a **go2rtc `exec:` source**. go2rtc **starts the process only
-  when a client connects and kills it on idle** - exactly the battery-friendly
-  behaviour we want (§5) - and handles WebRTC/HLS/RTSP fan-out. The transcode is
-  just part of the exec pipeline; there is no container for us to ship or manage.
-- Expose as a camera entity, device-linked to the official integration (§6.3).
+- On the first viewer, the integration opens one cloud session for the camera
+  in-process (async sockets, no subprocess), depacketizes RTP→HEVC or decrypts the
+  MPEG-PS, and pipes it through FFmpeg (`-c copy`) to **MPEG-TS**.
+- A `CameraBroadcast` fans that single session out to every consumer - go2rtc, the
+  HLS `stream` component, and the snapshot - and stops it when the last viewer leaves
+  (the battery-friendly behaviour of §5).
+- It is served from a token-guarded HA HTTP view (`/api/ezviz_stream/<serial>`);
+  `stream_source()` returns its `http://` URL. go2rtc pulls it and does the
+  HEVC→H.264 transcode for WebRTC.
+- Exposed as a camera entity, device-linked to the official integration (§6.3).
 
-**B. Standalone HA add-on - fallback only.** A container serving HLS on a local
-port + Generic/FFmpeg camera. Only worth it for installs where the bundled go2rtc
-`exec:` path is unavailable; you must implement on-demand start/stop and reconnect
-yourself. The `producer.py` / `rtp_hevc.py` / `handshake.py` modules are reused
-unchanged inside it.
+**Standalone add-on - not needed.** An earlier fallback plan (a container serving
+HLS/RTSP where go2rtc `exec:` was unavailable) is moot: the HTTP-view approach works
+on every install type with the bundled go2rtc, so no add-on ships.
 
 ### 6.1 The one real trade-off - HEVC vs H.264
 
@@ -293,30 +301,34 @@ generally needs **H.264**; HEVC only plays via HLS on Safari/iOS. So either:
   downscaling. FFmpeg `-c:v libx264 -preset veryfast -tune zerolatency`.
 - **Keep native HEVC** (no CPU cost) - plays only in Safari / the iOS companion
   app. Acceptable if that's the user's client.
-Make it a **config option**, default to on-demand H.264 transcode.
+In practice go2rtc performs this HEVC→H.264 transcode automatically for WebRTC; an
+explicit native-HEVC (no-transcode) config option is deferred.
 
 ### 6.2 Repo layout
 
-This repo (`hass-ezviz-stream`) is a HACS custom integration; all stream logic
-lives inside the integration package. There is **no `addon/` in the primary
-path** - go2rtc is the process host (§6). An add-on shell is only added if the
-fallback (option B) is ever needed, reusing the same core modules unchanged.
+This repo (`hass-ezviz-stream`) is a HACS custom integration; all stream logic lives
+inside the integration package. There is no add-on - the bundled go2rtc is the media
+hub and streaming runs in-process.
 
 ```
 hass-ezviz-stream/
   custom_components/ezviz_stream/
-    __init__.py      # entry setup, go2rtc `exec:` source registration
-    config_flow.py   # creds / serial(s) / region / codec option
-    camera.py        # camera entity, device-linked to official integration (§6.3)
-    handshake.py     # VTM/VTDU ysproto:// socket handshake (§3) - ours to write
-    rtp_hevc.py      # the de-packetizer in §4.1 - port verbatim
-    producer.py      # login→handshake→depacketize→stdout, reconnect + wake-retry
-    manifest.json    # requirements: pyEzvizApi (auth), ...
+    __init__.py       # entry setup, HTTP view registration, runtime data
+    config_flow.py    # account + camera subentry flow (add/reconfigure/reauth)
+    camera.py         # camera entity, snapshots, stream_source(); device-linked (§6.3)
+    api.py            # cloud auth, discovery, VTDU token (hand-rolled)
+    stream.py         # VTM/VTDU handshake + media loop; iter_annexb / grab_jpeg
+    ysproto.py        # ysproto framing + RTP/RFC-7798 HEVC depacketizer (§4.1)
+    decrypt.py        # AES-ECB Image-Encryption decryptor (one-shot + streaming)
+    broadcast.py      # on-demand MPEG-TS broadcaster (one session, fanned out)
+    stream_view.py    # token-guarded HTTP MPEG-TS view go2rtc pulls
+    producer.py       # standalone CLI diagnostic (not used at runtime)
+    manifest.json     # requirements: pycryptodome (no pyEzvizApi)
   doc/specification.md
 ```
 
-Auth (login / device list / VTDU tokens) is delegated to **`pyEzvizApi`** (a
-manifest requirement) - we implement only `handshake.py`.
+Auth (login, discovery, VTDU token) is **hand-rolled in `api.py`** - there is no
+runtime `pyEzvizApi` dependency (see the decisions block and §8).
 
 ### 6.3 Device-registry linking
 
@@ -374,7 +386,7 @@ APIs. Notes:
 - Inputs: EZVIZ **account email + password**, **camera serial(s)**, **region**
   (default `"Europe"`/`ieu` for South Africa).
 - **Never** commit credentials. In HA use `secrets.yaml` (gitignored); in a
-  dev/scratch context use an untracked env file. The producer authenticates as
+  dev/scratch context use an untracked env file. The integration authenticates as
   the EZVIZ **PC/Studio** client against the user's own account - legitimate for
   the user's own devices (interoperability), but treat creds as sensitive.
 - Cache the `sessionId`/tokens; don't re-login on every reconnect.
@@ -416,7 +428,8 @@ Structure:
    added/removed/reconfigured independently at any time. **Verification codes are
    per-camera - never assume a shared code.**
 
-Requires Home Assistant **≥ 2025.4** (config subentries; `hacs.json` floor).
+Config subentries require Home Assistant ≥ 2025.4, but the `hacs.json` floor is
+**2026.3.0** - the first release on Python 3.14, which this code requires.
 Implemented via `ConfigSubentryFlow` +
 `ConfigFlow.async_get_supported_subentry_types`. A camera entity should detect
 whether its stream is encrypted and only run the decryptor when needed (decrypting
@@ -429,7 +442,7 @@ a clear stream corrupts it) - see §4 and `reference.md` B.11.
   (a hard `==`, pre-cloud) and HA loads one shared env, so any version we required
   would clash with the official `ezviz` integration. We keep it as a **dev-only**
   dependency - a decryption *oracle* our own decryptor is differential-tested against
-  (`scripts/ezviz_decrypt.py`, `tests/test_ezviz_decrypt.py`). *(Reviewed 2026-07-13.)*
+  (`custom_components/ezviz_stream/decrypt.py`, `tests/test_ezviz_decrypt.py`). *(Reviewed 2026-07-13.)*
 - **Neither the HA-core `ezviz` nor `RenierM26/ha-ezviz` (HACS) streams from the
   cloud** - both are **local-RTSP only** (the verification code is used as the RTSP
   password, not for video decryption). The cloud-stream/decryption code exists only
@@ -443,17 +456,22 @@ a clear stream corrupts it) - see §4 and `reference.md` B.11.
   (`protocol.md`, `encryption.md`, `codecs.md`); needed if supporting the
   **encrypted** channel `0x0b`.
 
-## 9. Milestones for the new project
+## 9. Build status
 
-1. **Auth + handshake** → obtain a VTDU socket streaming channel-0x01 packets.
-   Hand-rolled (proven in `scripts/ezviz_cloud.py`) - **no runtime `pyEzvizApi`**
-   (see §8). Add **wake-retry**.
-2. **De-packetize** (§4.1) → write `.h265`; verify with FFmpeg. *(This is the
-   proven core - port it verbatim.)*
-3. **Producer**: continuous Annex-B HEVC to stdout + **reconnect loop** for the
-   ~27 s drops + KeepAlive.
-4. **Serve**: wire into go2rtc `exec:` (option A) or an HLS add-on (option B);
-   add the HEVC/H.264 transcode option.
-5. **HA entity** + config flow (creds/serial/region), on-demand start/stop.
-6. Nice-to-haps: multi-camera, encrypted-channel support (`0x0b`), snapshot via
-   the same path.
+All of the below shipped and are live-verified (2026-07-14):
+
+1. **Auth + handshake** - hand-rolled cloud login, discovery, VTDU token, and the
+   VTM/VTDU handshake (`api.py`, `stream.py`); no runtime `pyEzvizApi` (§8), with
+   cam wake-retry.
+2. **De-packetize / decrypt** (§4.1) - RTP/RFC-7798 HEVC depacketizer (`ysproto.py`)
+   and the AES-ECB Image-Encryption decryptor (`decrypt.py`), the latter also as an
+   incremental streaming variant for continuous IPC live.
+3. **Stream core** - continuous media with a reconnect loop across the ~27 s VTDU
+   drop + KeepAlive, consumed in-process (no subprocess).
+4. **Serve** - remux to MPEG-TS and expose a token-guarded HTTP view that go2rtc
+   pulls (§6); go2rtc does the WebRTC HEVC→H.264 transcode.
+5. **HA entity + config flow** - account entry + per-camera subentries with
+   add / reconfigure / reauth and an on-save frame check; on-demand start/stop;
+   snapshots (cached, retained across restarts).
+6. **Remaining / nice-to-have:** 2FA login, a native-HEVC codec option, an MJPEG
+   fallback, and multi-camera niceties.

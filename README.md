@@ -33,8 +33,8 @@ your dashboard, and it decrypts the video for cameras that have Image Encryption
 
 ## Requirements
 
-- **Home Assistant 2025.4.0 or newer**, on a build running **Python 3.14**
-  (see [Compatibility](#compatibility)).
+- **Home Assistant 2026.3.0 or newer** (the release that adopted Python 3.14; the
+  integration uses Python 3.14 features and won't load on older builds).
 - An EZVIZ cloud account with **two-step verification disabled** (same constraint as
   the official `ezviz` integration for now).
 - For any camera with **Image Encryption** on, its **verification code** - the
@@ -155,12 +155,6 @@ local-network camera:
   streams - view or snapshot fewer cameras at once.
 - **Two-step verification.** If sign-in fails, make sure 2FA is turned off in the EZVIZ
   app.
-
-## Compatibility
-
-This integration runs on **Python 3.14**, so it needs a Home Assistant build that uses
-that Python version. It also uses config subentries, which require Home Assistant
-**2025.4.0 or newer**. On an older Python the integration will fail to load.
 
 ## Credits
 
