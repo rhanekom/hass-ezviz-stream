@@ -26,7 +26,7 @@ dev = [
     "homeassistant>=2026.7.2",
     "pre-commit==4.5.1",
     "ruff==0.15.1",
-    "mypy==1.19.1",
+    "mypy==2.3.0",
     "python-dotenv",
     "pytest-homeassistant-custom-component>=0.13.346",
     "scapy>=2.7.0",
