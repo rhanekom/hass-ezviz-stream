@@ -102,6 +102,22 @@ def _remove_snapshot(path: Path) -> None:
     path.unlink(missing_ok=True)
 
 
+def _snapshot_path_for(hass: HomeAssistant, serial: str) -> Path:
+    """Path to a camera's persisted last-good frame."""
+    return Path(hass.config.path(_SNAPSHOT_DIR)) / f"{serial}.jpg"
+
+
+def remove_snapshot_file(hass: HomeAssistant, serial: str) -> None:
+    """
+    Delete a camera's persisted snapshot on real removal (executor job).
+
+    Deliberately not called on unload/reload: the frame is a restart fallback, so it
+    must survive a restart and is removed only when the camera itself is deleted
+    (see ``async_remove_*`` in :mod:`__init__`).
+    """
+    _remove_snapshot(_snapshot_path_for(hass, serial))
+
+
 async def async_setup_entry(
     hass: HomeAssistant,  # noqa: ARG001 - platform setup signature fixed by HA
     entry: EzvizStreamConfigEntry,
@@ -169,7 +185,7 @@ class EzvizStreamCamera(Camera):
     @property
     def _snapshot_path(self) -> Path:
         """Path to this camera's persisted last-good frame."""
-        return Path(self.hass.config.path(_SNAPSHOT_DIR)) / f"{self._serial}.jpg"
+        return _snapshot_path_for(self.hass, self._serial)
 
     @property
     def _cache_ttl(self) -> float:
@@ -221,10 +237,16 @@ class EzvizStreamCamera(Camera):
                 self.async_write_ha_state()
 
     async def async_will_remove_from_hass(self) -> None:
-        """Deregister, stop the broadcaster, and delete the persisted frame."""
+        """
+        Deregister and stop the broadcaster (runtime cleanup only).
+
+        The persisted frame is intentionally left on disk: this hook runs on every
+        unload/reload (including a restart), and the frame is the restart fallback. It
+        is deleted only when the camera is actually removed (``async_remove_*`` in
+        :mod:`__init__`), so a restart restores it instead of blanking the tile.
+        """
         unregister_stream(self.hass, self._serial)
         await self._broadcast.async_stop()
-        await self.hass.async_add_executor_job(_remove_snapshot, self._snapshot_path)
 
     async def stream_source(self) -> str:
         """

@@ -210,7 +210,7 @@ async def test_get_last_motion_returns_image_and_epoch_seconds() -> None:
     motion = await api.async_get_last_motion("SN1")
     assert motion is not None
     assert motion.image == b"IMG"
-    assert motion.timestamp == 1700000000.0  # epoch ms normalised to seconds
+    assert motion.timestamp == pytest.approx(1700000000.0)  # epoch ms -> seconds
 
 
 # --- pure helpers ----------------------------------------------------------- #

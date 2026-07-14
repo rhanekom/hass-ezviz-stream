@@ -14,12 +14,17 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.ezviz_stream import async_remove_config_entry_device
+from custom_components.ezviz_stream import (
+    async_remove_config_entry_device,
+    async_remove_entry,
+)
 from custom_components.ezviz_stream.api import EzvizCamera, MotionImage
 from custom_components.ezviz_stream.camera import (
     EzvizStreamCamera,
+    _snapshot_path_for,
     _write_snapshot,
     async_setup_entry,
+    remove_snapshot_file,
 )
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
@@ -179,12 +184,20 @@ async def test_remove_config_entry_device_removes_only_that_camera(
         )
         assert device is not None
 
+        # Persist a frame for each camera; deleting SN1 must remove only SN1's file.
+        sn1_snap = _snapshot_path_for(hass, "SN1")
+        sn2_snap = _snapshot_path_for(hass, "SN2")
+        await hass.async_add_executor_job(_write_snapshot, sn1_snap, b"J" * 100)
+        await hass.async_add_executor_job(_write_snapshot, sn2_snap, b"K" * 100)
+
         removed = await async_remove_config_entry_device(hass, entry, device)
         await hass.async_block_till_done()
 
     assert removed is True
     serials = {se.data[CONF_SERIAL] for se in entry.subentries.values()}
     assert serials == {"SN2"}  # only SN1 removed; the account entry survives
+    assert not sn1_snap.exists()  # SN1's persisted frame deleted with its device
+    assert sn2_snap.exists()  # SN2's frame untouched
 
 
 async def test_snapshot_cached_within_ttl(hass: HomeAssistant) -> None:
@@ -542,9 +555,9 @@ async def test_snapshot_persisted_and_restored_across_restart(
     assert cam2._image == b"J" * 6000
     assert not cam2._image_at  # stale (0.0), so a fresh grab is still attempted first
 
-    # Removing the camera deletes the persisted frame.
+    # An unload (e.g. a restart/reload) must NOT delete the frame - it is the fallback.
     await cam2.async_will_remove_from_hass()
-    assert not cam2._snapshot_path.exists()
+    assert cam2._snapshot_path.exists()
 
 
 async def test_stream_source_and_registry_lifecycle(hass: HomeAssistant) -> None:
@@ -786,3 +799,35 @@ async def test_static_motion_restores_baseline_on_add(hass: HomeAssistant) -> No
     assert camera._static_image == b"BASE" * 100  # restored baseline
     assert camera._image == b"BASE" * 100  # also seeded as the failure fallback
     await camera.async_will_remove_from_hass()
+
+
+async def test_snapshot_survives_unload_and_removed_on_delete(
+    hass: HomeAssistant,
+) -> None:
+    """A persisted frame survives an unload; it is deleted only on real removal."""
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1", CONF_IS_BATTERY: False})
+    await hass.async_add_executor_job(
+        _write_snapshot, camera._snapshot_path, b"J" * 6000
+    )
+    await camera.async_added_to_hass()
+
+    await camera.async_will_remove_from_hass()  # an unload, e.g. a restart/reload
+    assert camera._snapshot_path.exists()  # frame kept for the restart fallback
+
+    await hass.async_add_executor_job(remove_snapshot_file, hass, "SN1")
+    assert not camera._snapshot_path.exists()  # gone only on a real removal
+
+
+async def test_account_removal_deletes_all_snapshots(hass: HomeAssistant) -> None:
+    """Removing the whole account entry deletes every camera's persisted frame."""
+    entry = _entry_with_two_cameras()
+    entry.add_to_hass(hass)
+    sn1 = _snapshot_path_for(hass, "SN1")
+    sn2 = _snapshot_path_for(hass, "SN2")
+    await hass.async_add_executor_job(_write_snapshot, sn1, b"J" * 100)
+    await hass.async_add_executor_job(_write_snapshot, sn2, b"K" * 100)
+
+    await async_remove_entry(hass, entry)
+
+    assert not sn1.exists()
+    assert not sn2.exists()

@@ -34,6 +34,8 @@ dev = [
     "pyturbojpeg>=2.4.0",
     "ha-ffmpeg>=3.2.2",
     "pylint>=4.0.6",
+    "isal>=1.8.0",
+    "zlib-ng>=1.0.0",
 ]
 
 # This repo is a Home Assistant custom component, not an installable package, so

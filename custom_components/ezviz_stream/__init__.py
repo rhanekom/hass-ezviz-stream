@@ -12,6 +12,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import CannotConnect, EzvizCloudApi, InvalidAuth, MfaRequired
+from .camera import remove_snapshot_file
 from .const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_MAX_SNAPSHOTS,
@@ -127,13 +128,32 @@ async def async_remove_config_entry_device(
         for identifier in device_entry.identifiers
         if identifier[0] == OFFICIAL_EZVIZ_DOMAIN
     }
-    for subentry_id, subentry in list(config_entry.subentries.items()):
-        if (
-            subentry.subentry_type == CAMERA_SUBENTRY_TYPE
-            and subentry.data.get(CONF_SERIAL) in serials
-        ):
-            hass.config_entries.async_remove_subentry(config_entry, subentry_id)
+    # Collect first, then remove: removing mutates config_entry.subentries.
+    to_remove = [
+        (subentry_id, subentry.data.get(CONF_SERIAL))
+        for subentry_id, subentry in config_entry.subentries.items()
+        if subentry.subentry_type == CAMERA_SUBENTRY_TYPE
+        and subentry.data.get(CONF_SERIAL) in serials
+    ]
+    for subentry_id, _serial in to_remove:
+        hass.config_entries.async_remove_subentry(config_entry, subentry_id)
+    # This is a real removal (not an unload), so drop each camera's persisted frame.
+    for _subentry_id, serial in to_remove:
+        if serial:
+            await hass.async_add_executor_job(remove_snapshot_file, hass, serial)
     return True
+
+
+async def async_remove_entry(
+    hass: HomeAssistant, entry: EzvizStreamConfigEntry
+) -> None:
+    """Delete every camera's persisted frame when the account entry is removed."""
+    for subentry in entry.subentries.values():
+        if subentry.subentry_type != CAMERA_SUBENTRY_TYPE:
+            continue
+        serial = subentry.data.get(CONF_SERIAL)
+        if serial:
+            await hass.async_add_executor_job(remove_snapshot_file, hass, serial)
 
 
 async def async_unload_entry(

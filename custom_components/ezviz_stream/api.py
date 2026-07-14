@@ -164,6 +164,34 @@ def _first_image_url(value: Any) -> str | None:
     return None
 
 
+def _camera_from_resource(
+    resource: dict[str, Any],
+    vtm_map: dict[str, Any],
+    dev_infos: dict[str, Any],
+    status_map: dict[str, Any],
+) -> EzvizCamera | None:
+    """Build an EzvizCamera from a pagelist resource, or None if it is not a camera."""
+    serial = resource.get("deviceSerial")
+    if not serial or int(resource.get("resourceType", 0)) <= 0:
+        return None
+    vtm = vtm_map.get(resource.get("resourceId")) or {}
+    info = dev_infos.get(serial, {})
+    status = status_map.get(serial) or {}
+    return EzvizCamera(
+        serial=serial,
+        name=resource.get("localName") or info.get("name") or "",
+        category=info.get("deviceCategory", ""),
+        channel=int(info.get("channelNumber") or 1),
+        status=info.get("status"),
+        streamable=bool(vtm.get("externalIp")),
+        vtm_ip=vtm.get("externalIp"),
+        vtm_port=int(vtm["port"]) if vtm.get("port") else None,
+        biz=resource.get("streamBizUrl", ""),
+        is_encrypted=bool(status["isEncrypt"]) if "isEncrypt" in status else None,
+        encrypt_pwd_hash=str(status.get("encryptPwd") or ""),
+    )
+
+
 def _deep_find(obj: Any, key: str) -> Any:
     """Return the first truthy value for ``key`` anywhere in a nested dict/list."""
     if isinstance(obj, dict):
@@ -243,32 +271,16 @@ class EzvizCloudApi:
             for di in (_deep_find(body, "deviceInfos") or [])
             if di.get("deviceSerial")
         }
-        cameras: list[EzvizCamera] = []
-        for resource in _deep_find(body, "resourceInfos") or []:
-            serial = resource.get("deviceSerial")
-            if not serial or int(resource.get("resourceType", 0)) <= 0:
-                continue
-            vtm = vtm_map.get(resource.get("resourceId")) or {}
-            info = dev_infos.get(serial, {})
-            status = status_map.get(serial) or {}
-            cameras.append(
-                EzvizCamera(
-                    serial=serial,
-                    name=resource.get("localName") or info.get("name") or "",
-                    category=info.get("deviceCategory", ""),
-                    channel=int(info.get("channelNumber") or 1),
-                    status=info.get("status"),
-                    streamable=bool(vtm.get("externalIp")),
-                    vtm_ip=vtm.get("externalIp"),
-                    vtm_port=int(vtm["port"]) if vtm.get("port") else None,
-                    biz=resource.get("streamBizUrl", ""),
-                    is_encrypted=(
-                        bool(status["isEncrypt"]) if "isEncrypt" in status else None
-                    ),
-                    encrypt_pwd_hash=str(status.get("encryptPwd") or ""),
+        return [
+            camera
+            for resource in _deep_find(body, "resourceInfos") or []
+            if (
+                camera := _camera_from_resource(
+                    resource, vtm_map, dev_infos, status_map
                 )
             )
-        return [cam for cam in cameras if cam.streamable]
+            and camera.streamable
+        ]
 
     async def async_get_last_motion(
         self, serial: str, *, verification_code: str = ""
