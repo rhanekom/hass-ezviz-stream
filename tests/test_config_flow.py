@@ -202,6 +202,7 @@ async def test_add_battery_camera_defaults_to_slow_thumbnails(
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_SLOW_THUMBNAILS] is True
+    assert result["data"][CONF_STREAM] == 2  # battery cams default to the sub stream
 
 
 async def test_add_camera_aborts_when_all_added(hass: HomeAssistant) -> None:

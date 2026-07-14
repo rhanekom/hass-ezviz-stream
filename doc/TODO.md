@@ -20,8 +20,9 @@ git history; this list is the feature-level summary.
   region, validated) then per-camera add, each with its own Image-Encryption
   verification code. Per-camera **reconfigure**, account **reauth**, and a **frame-grab
   validation** on save (retry / save-anyway soft block). Simple form with an
-  **Advanced** section (thumbnail cadence, main/sub stream) and a **battery-drain
-  warning**. Camera entities link to the official `ezviz` device.
+  **Advanced** section (thumbnail cadence, main/sub stream; battery cams default to
+  the **sub stream** + slower thumbnails) and a **battery-drain warning**. Camera
+  entities link to the official `ezviz` device.
 - **Cloud protocol core (no runtime `pyezvizapi`).** Hand-rolled region login,
   device discovery, VTDU token, and the VTM/VTDU `ysproto` handshake; RTP/RFC-7798
   HEVC depacketizer; MPEG-PS transport; our own AES-ECB Image-Encryption decryptor
@@ -49,20 +50,16 @@ git history; this list is the feature-level summary.
   rejects `exec:` (insecure-producer + ffmpeg-only allow-list); go2rtc pulls our
   token-guarded `http://` URL instead (§6). Default HEVC->H.264 transcode is go2rtc's.
 - **On-demand only** - stream while watched, stop on idle (battery-friendly).
+- **Live buffering: leave it to WebRTC (resolved 2026-07-14).** RTP-clock pacing
+  fixed the source-side timing. Any residual edge-chasing is network-bound (link
+  jitter/bandwidth), and the decisive playout buffer lives in the browser's WebRTC
+  receiver - not in our integration, and not usefully in go2rtc. We do not add an
+  integration-level buffer (it would only add latency, not stop the browser skipping).
+  Mitigation for a weak link is the **sub-stream** (lower bitrate) + the network
+  itself. MJPEG is *not* a fix here - its higher bandwidth worsens a constrained link.
 
 ## Remaining
 
-- [ ] **OPEN DECISION - live buffer methodology.** With RTP-timestamp pacing the
-      source timeline is correct, but WebRTC still minimises latency and can
-      skip/"catch up" rather than lag steadily. Decide: (a) accept WebRTC catch-up;
-      (b) force a small fixed playout buffer; (c) offer a buffer-and-lag transport
-      (MJPEG/HLS). Revisit after evaluating the pacing change live.
-- [ ] **MJPEG serving mode (opt-in fallback).** No go2rtc / `stream` dependency,
-      sidesteps HEVC-in-browser (FFmpeg decodes to JPEG server-side). Override
-      `Camera.handle_async_mjpeg_stream` to push frames from a `mjpeg_source` sibling of
-      `broadcast.mpegts_source`, driven through the existing `CameraBroadcast` (one
-      decode fanned to N viewers). Trade-off: heavy bandwidth, live-only, fps-capped -
-      but robust. Feeds the buffer-methodology decision above.
 - [ ] **Options flow additions.** Codec (transcode vs native HEVC - needs the go2rtc
       wiring decision); serving mode (needs MJPEG first); diagnostics download.
 - [ ] **README / docs** - install + configuration.
@@ -75,6 +72,11 @@ git history; this list is the feature-level summary.
       shows the approach works). 2FA fast-follow.
 - [ ] Multi-camera niceties; pre-fill the camera picker from existing `ezviz`
       devices (§6.3).
+- [ ] **MJPEG serving mode - compatibility fallback only.** Opt-in path that decodes
+      to JPEG server-side (no go2rtc/WebRTC, no HEVC-in-browser), via a `mjpeg_source`
+      sibling of `broadcast.mpegts_source` through the existing `CameraBroadcast`.
+      Scope is *codec/browser incompatibility*, NOT network jitter (its 4-8x bandwidth
+      worsens a weak link). Low priority unless a real compatibility gap turns up.
 
 ## Container rebuild notes
 

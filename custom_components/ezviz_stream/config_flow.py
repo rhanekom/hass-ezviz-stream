@@ -132,7 +132,8 @@ def _battery_note(*, is_battery: bool) -> str:
     return (
         " This is a battery-powered camera: live viewing streams from the cloud and "
         "drains the battery, so watch it only when needed (the stream runs only while "
-        "someone is watching)."
+        "someone is watching). The lower-bandwidth sub stream is preselected under "
+        "Advanced."
     )
 
 
@@ -327,13 +328,14 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
             self._pending_data, self._pending_subentry = data, None
             return await self.async_step_verify_failed()
 
-        # Battery cams default to the slower cadence; the user can override it here.
+        # Battery cams default to the slower cadence and the lower-bandwidth sub
+        # stream (kinder to the battery and a weak link); the user can override both.
         return self.async_show_form(
             step_id="options",
             data_schema=_camera_options_schema(
                 verification_code="",
                 slow_thumbnails=camera.is_battery,
-                stream=DEFAULT_STREAM,
+                stream=SUB_STREAM if camera.is_battery else DEFAULT_STREAM,
             ),
             description_placeholders={
                 "camera": camera.label,
