@@ -208,7 +208,7 @@ async def test_snapshot_persisted_and_restored_across_restart(
     cam2.hass = hass
     await cam2.async_added_to_hass()
     assert cam2._image == b"J" * 6000
-    assert cam2._image_at == 0.0  # stale, so a fresh grab is still attempted first
+    assert not cam2._image_at  # stale (0.0), so a fresh grab is still attempted first
 
     # Removing the camera deletes the persisted frame.
     await cam2.async_will_remove_from_hass()

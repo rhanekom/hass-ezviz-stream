@@ -85,6 +85,6 @@ class EzvizStreamMediaView(HomeAssistantView):
         try:
             async for chunk in entry.broadcast.subscribe():
                 await response.write(chunk)
-        except ConnectionResetError, ConnectionError:
+        except ConnectionError:  # covers ConnectionResetError
             pass  # client (go2rtc/ffmpeg) disconnected; unsubscribe happens in finally
         return response

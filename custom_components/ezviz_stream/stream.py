@@ -116,7 +116,7 @@ async def _open_connection(
         return await asyncio.wait_for(
             asyncio.open_connection(host, port), _CONNECT_TIMEOUT
         )
-    except (OSError, TimeoutError) as err:
+    except OSError as err:  # TimeoutError is a subclass of OSError
         msg = f"cannot connect to {host}:{port}: {err}"
         raise StreamError(msg) from err
 

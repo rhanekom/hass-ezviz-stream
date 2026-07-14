@@ -80,7 +80,7 @@ async def test_upstream_stops_when_last_subscriber_leaves() -> None:
     assert cancelled.is_set()
 
 
-async def test_offer_drops_oldest_when_subscriber_full() -> None:
+def test_offer_drops_oldest_when_subscriber_full() -> None:
     """A slow subscriber drops its oldest chunk rather than blocking the broadcast."""
     queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=2)
     broadcast._offer(queue, b"1")
@@ -96,24 +96,24 @@ def test_pacer_schedules_on_the_rtp_clock() -> None:
     """Frames are released on the camera's 90 kHz cadence, not their arrival time."""
     pacer = broadcast._Pacer()
     # First frame rebases to "now" and plays immediately, whatever the wall time.
-    assert pacer.delay(1_000_000, now=100.0) == 0.0
+    assert pacer.delay(1_000_000, now=100.0) == pytest.approx(0.0, abs=1e-9)
     # A frame 9000 ticks (0.1 s) later should be released ~0.1 s after the base, even
     # if it arrived early (now advanced only 0.02 s) - i.e. we wait ~0.08 s.
     assert pacer.delay(1_009_000, now=100.02) == pytest.approx(0.08, abs=1e-6)
     # A frame that arrives late (past its target) is released immediately.
-    assert pacer.delay(1_018_000, now=100.5) == 0.0
+    assert pacer.delay(1_018_000, now=100.5) == pytest.approx(0.0, abs=1e-9)
 
 
 def test_pacer_rebases_on_discontinuity() -> None:
     """A backwards jump or a >2 s gap (reconnect/wrap) rebases to now, not a replay."""
     pacer = broadcast._Pacer()
-    assert pacer.delay(5_000_000, now=10.0) == 0.0
+    assert pacer.delay(5_000_000, now=10.0) == pytest.approx(0.0, abs=1e-9)
     # Fresh RTP base from a reconnect (a big forward jump) -> rebase, play now.
-    assert pacer.delay(9_000_000, now=40.0) == 0.0
+    assert pacer.delay(9_000_000, now=40.0) == pytest.approx(0.0, abs=1e-9)
     # A small step after the rebase is scheduled normally again.
     assert pacer.delay(9_004_500, now=40.0) == pytest.approx(0.05, abs=1e-6)
     # A backwards step (reordering / new base) also rebases.
-    assert pacer.delay(1_000, now=41.0) == 0.0
+    assert pacer.delay(1_000, now=41.0) == pytest.approx(0.0, abs=1e-9)
 
 
 async def test_mpegts_source_missing_camera_yields_nothing() -> None:

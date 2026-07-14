@@ -256,14 +256,14 @@ class CameraBroadcast:
         """Pull the upstream source and push each chunk to every subscriber."""
         try:
             async for chunk in self._source_factory():
-                for queue in list(self._subscribers):
+                for queue in self._subscribers:
                     _offer(queue, chunk)
         except asyncio.CancelledError:
             raise
         except Exception:
             _LOGGER.exception("broadcast upstream for camera failed")
         finally:
-            for queue in list(self._subscribers):
+            for queue in self._subscribers:
                 _offer(queue, None)  # signal end-of-stream to consumers
 
 
