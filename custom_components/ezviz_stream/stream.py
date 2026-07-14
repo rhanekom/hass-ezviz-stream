@@ -52,6 +52,10 @@ _RETRY_BACKOFF = 2.0  # brief pause between sessions (wakes a sleeping cam; ease
 _RECV = 65536
 _FFMPEG_FMT = {"rtp": "hevc", "mpeg-ps": "mpeg", "mpeg-ts": "mpegts"}
 _MIN_JPEG_BYTES = 5000  # smaller than a real frame => a decode artifact
+# StreamInfoRsp results that mean "too many streams / out of capacity" (reference
+# B.12) - distinct from the churn timeout 5405. Surfaced so a tuned concurrency cap
+# can be judged empirically (hit the wall vs. just churn).
+_CONCURRENCY_LIMIT_CODES = frozenset({5416, 5503, 5504, 5546})
 
 
 class StreamError(Exception):
@@ -166,6 +170,12 @@ async def open_stream(
     result = (rsp.get(1) or [0])[0]
     if result not in (0, None):
         vtdu_writer.close()
+        if result in _CONCURRENCY_LIMIT_CODES:
+            _LOGGER.warning(
+                "EZVIZ concurrency/resource limit hit (result=%s): too many "
+                "simultaneous cloud streams - reduce concurrent viewers/snapshots",
+                result,
+            )
         msg = f"VTDU StreamInfoRsp result={result}"
         raise StreamError(msg)
     return vtdu_reader, vtdu_writer, field_str(rsp, 4)

@@ -22,9 +22,12 @@ PLATFORMS: list[Platform] = [Platform.CAMERA]
 
 _VIEW_REGISTERED = "view_registered"
 
-# EZVIZ rejects a burst of concurrent VTDU sessions (result 5405/5452), which a
-# dashboard of camera cards would trigger. Serialise streaming account-wide.
-MAX_CONCURRENT_STREAMS = 1
+# Cap concurrent snapshot grabs account-wide. A burst of them (a dashboard of camera
+# cards cold-loading) once overwhelmed EZVIZ's signalling with churn (result 5405),
+# not a hard cap - so a small count is fine. Raised 1 -> 2 to speed multi-camera
+# thumbnail fill; if the hard concurrency codes (5504/5546) appear (logged by
+# stream.open_stream), back this off. Live streams are one-per-camera and ungated.
+MAX_CONCURRENT_STREAMS = 2
 
 
 @dataclass

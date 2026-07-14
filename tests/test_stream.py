@@ -42,6 +42,12 @@ async def test_frame_reader_eof_sets_closed() -> None:
     assert frame_reader.closed
 
 
+def test_concurrency_limit_codes_recognised() -> None:
+    """The concurrency/resource result codes are recognised; churn (5405) is not."""
+    assert {5416, 5503, 5504, 5546} <= stream._CONCURRENCY_LIMIT_CODES
+    assert 5405 not in stream._CONCURRENCY_LIMIT_CODES  # 5405 = churn/CAS timeout
+
+
 async def test_stream_annexb_writes_iter_annexb_chunks() -> None:
     """stream_annexb (the CLI producer wrapper) writes+flushes each yielded chunk."""
 
