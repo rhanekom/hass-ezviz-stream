@@ -197,14 +197,10 @@ async def test_get_last_motion_returns_image_and_epoch_seconds() -> None:
         "alarms": [{"picUrl": "https://oss.example/x.jpg", "alarmTime": 1700000000000}],
     }
     session = _session({"users/login": _LOGIN_OK, "alarms/v2/advanced": alarm})
-
-    async def _get(_url: str, **_kwargs: Any) -> MagicMock:
-        resp = MagicMock()
-        resp.status = 200
-        resp.read = AsyncMock(return_value=b"IMG")
-        return resp
-
-    session.get = _get
+    resp = MagicMock()
+    resp.status = 200
+    resp.read = AsyncMock(return_value=b"IMG")
+    session.get = AsyncMock(return_value=resp)
     api = EzvizCloudApi(session)
     await api.async_login("user@example.com", "pw", "Europe")
     motion = await api.async_get_last_motion("SN1")
@@ -314,14 +310,10 @@ def _alarm_session_with_get(status: int, data: bytes) -> MagicMock:
     """A session whose alarm query yields one picUrl and whose GET returns ``data``."""
     alarm = {"meta": {"code": 200}, "alarms": [{"picUrl": "https://oss.example/x.jpg"}]}
     session = _session({"users/login": _LOGIN_OK, "alarms/v2/advanced": alarm})
-
-    async def _get(_url: str, **_kwargs: Any) -> MagicMock:
-        resp = MagicMock()
-        resp.status = status
-        resp.read = AsyncMock(return_value=data)
-        return resp
-
-    session.get = _get
+    resp = MagicMock()
+    resp.status = status
+    resp.read = AsyncMock(return_value=data)
+    session.get = AsyncMock(return_value=resp)
     return session
 
 

@@ -306,7 +306,7 @@ async def test_terminate_graceful_no_kill() -> None:
     proc = MagicMock()
     proc.returncode = None
 
-    async def _wait() -> None:
+    def _wait() -> None:
         proc.returncode = 0  # exits promptly after terminate()
 
     proc.wait = AsyncMock(side_effect=_wait)

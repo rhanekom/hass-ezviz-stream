@@ -150,11 +150,12 @@ async def test_streaminfo_exchange_returns_decoded_rsp() -> None:
 async def test_streaminfo_exchange_timeout_raises() -> None:
     """No StreamInfoRsp before the handshake deadline surfaces a StreamError."""
     reader = asyncio.StreamReader()  # nothing fed, never eof
+    writer = _writer()
     with (
         patch.object(stream, "_HANDSHAKE_TIMEOUT", 0.05),
         pytest.raises(stream.StreamError),
     ):
-        await stream._streaminfo_exchange(reader, _writer(), "url", None)
+        await stream._streaminfo_exchange(reader, writer, "url", None)
 
 
 # --------------------------------------------------------------------------- #
@@ -182,8 +183,9 @@ async def test_open_connection_failure_raises() -> None:
 # open_stream (VTM -> VTDU handshake)
 # --------------------------------------------------------------------------- #
 async def test_open_stream_no_vtm_routing_raises() -> None:
+    camera = _camera(vtm_ip=None)
     with pytest.raises(stream.StreamError):
-        await stream.open_stream(_camera(vtm_ip=None), "tok", stream=1)
+        await stream.open_stream(camera, "tok", stream=1)
 
 
 async def test_open_stream_handshake_success() -> None:
@@ -212,6 +214,7 @@ async def test_open_stream_handshake_success() -> None:
 async def test_open_stream_no_redirect_raises() -> None:
     """A VTM response without a redirect (field 7 or embedded URL) fails."""
     conns = AsyncMock(side_effect=[(asyncio.StreamReader(), _writer())])
+    camera = _camera()
     with (
         patch.object(stream, "_open_connection", conns),
         patch.object(
@@ -219,7 +222,7 @@ async def test_open_stream_no_redirect_raises() -> None:
         ),
         pytest.raises(stream.StreamError),
     ):
-        await stream.open_stream(_camera(), "tok", stream=1)
+        await stream.open_stream(camera, "tok", stream=1)
 
 
 async def test_open_stream_concurrency_limit_raises() -> None:
@@ -237,12 +240,13 @@ async def test_open_stream_concurrency_limit_raises() -> None:
             {1: [5416]},  # a _CONCURRENCY_LIMIT_CODES value
         ]
     )
+    camera = _camera()
     with (
         patch.object(stream, "_open_connection", conns),
         patch.object(stream, "_streaminfo_exchange", exch),
         pytest.raises(stream.StreamError),
     ):
-        await stream.open_stream(_camera(), "tok", stream=1)
+        await stream.open_stream(camera, "tok", stream=1)
 
     w_vtdu.close.assert_called_once()
 

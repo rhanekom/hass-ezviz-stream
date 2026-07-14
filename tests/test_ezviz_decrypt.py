@@ -251,8 +251,9 @@ def test_large_nal_streaming_matches_one_shot(nhs: int) -> None:
 
 # --- guard rails ------------------------------------------------------------ #
 def test_negative_nalu_header_size_raises() -> None:
+    header = _pack_header()
     with pytest.raises(ValueError, match="non-negative"):
-        ez.decrypt_ps_video(_pack_header(), CODE, nalu_header_size=-1)
+        ez.decrypt_ps_video(header, CODE, nalu_header_size=-1)
 
 
 def test_detect_returns_default_without_video_evidence() -> None:

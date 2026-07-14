@@ -641,6 +641,7 @@ async def test_make_source_builds_mpegts_source(hass: HomeAssistant) -> None:
         ),
     ):
         result = camera._make_source()
+        await hass.async_block_till_done()
 
     assert result == "SRC"
     assert ms.call_args.args[0] is api
