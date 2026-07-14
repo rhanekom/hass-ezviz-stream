@@ -45,6 +45,10 @@ _LOGGER = logging.getLogger(__name__)
 # fetch does not hang. Efficient live view arrives with go2rtc (Milestone C).
 _SNAPSHOT_TIMEOUT = 30.0
 _SNAPSHOT_MAX_SESSIONS = 3  # limit reconnect churn per image request
+# On a cold cache, wait at most this long for the first grab - kept under HA's
+# CAMERA_IMAGE_TIMEOUT (10 s) so the request returns before HA cancels it, while the
+# grab keeps running in the background to populate the cache for the next request.
+_COLD_GRAB_WAIT = 9.0
 # The last good frame is persisted here so a cold start (the in-memory cache is empty
 # after a restart) falls back to it instead of a blank tile until a fresh grab
 # succeeds. It is camera imagery at rest: kept in the HA config dir, owner-only
@@ -281,34 +285,32 @@ class EzvizStreamCamera(Camera):
         height: int | None = None,  # noqa: ARG002
     ) -> bytes | None:
         """
-        Return the cached frame immediately, refreshing in the background if stale.
+        Return the cached frame, refreshing in the background; never block past 10 s.
 
         Stale-while-revalidate: a grab drives login -> handshake -> media -> decode and
         can take up to ``_SNAPSHOT_TIMEOUT`` (~30 s), but HA aborts an image request
-        after ``CAMERA_IMAGE_TIMEOUT`` (10 s). Blocking a request on a grab therefore
-        blanks the tile even though we hold a good (just-stale) frame. So we always
-        return the cached frame at once - fresh or stale, including one restored from
-        disk across a restart - and only kick a background refresh when it is stale.
-        The very first grab (no frame yet) is the only one we block on.
+        after ``CAMERA_IMAGE_TIMEOUT`` (10 s). So a held frame (fresh or stale, incl.
+        one restored from disk) is returned at once and the refresh runs in the
+        background. With no frame yet we wait only ``_COLD_GRAB_WAIT`` for the grab -
+        under the 10 s cutoff and WITHOUT cancelling it, so a slow first grab keeps
+        running in the background and populates the cache for the next request rather
+        than being cancelled and lost (which would blank the tile forever).
         """
-        if self._image is not None:
-            if time.monotonic() - self._image_at >= self._cache_ttl:
-                self._schedule_snapshot_refresh()
-            return self._image
-
-        # Cold: nothing cached yet, so block on the first grab.
-        async with self._image_lock:
-            if self._image is None:
-                await self._async_grab_into_cache()
+        if self._image is None or time.monotonic() - self._image_at >= self._cache_ttl:
+            task = self._schedule_snapshot_refresh()
+            if self._image is None and task is not None:
+                # asyncio.wait does not cancel the task on timeout, so a slow grab
+                # survives to fill the cache even though we return None now.
+                await asyncio.wait({task}, timeout=_COLD_GRAB_WAIT)
         return self._image
 
-    def _schedule_snapshot_refresh(self) -> None:
-        """Kick a background snapshot grab unless one is already running."""
+    def _schedule_snapshot_refresh(self) -> asyncio.Task[None] | None:
+        """Kick a background snapshot grab unless one is already running; return it."""
         if self._image_lock.locked():
-            return
+            return None
         # eager_start=False so the grab runs entirely off the request path - the
         # caller gets the cached frame back before any of the refresh runs.
-        self.hass.async_create_background_task(
+        return self.hass.async_create_background_task(
             self._async_background_refresh(),
             f"ezviz_stream snapshot refresh {self._serial}",
             eager_start=False,
