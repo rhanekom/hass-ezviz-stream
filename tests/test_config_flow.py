@@ -21,6 +21,7 @@ from custom_components.ezviz_stream.api import (
 )
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_MAX_SNAPSHOTS,
     CONF_REGION,
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
@@ -364,3 +365,24 @@ async def test_reauth_flow_surfaces_invalid_auth(hass: HomeAssistant) -> None:
 
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "invalid_auth"}
+
+
+# --- options flow ----------------------------------------------------------- #
+async def test_options_flow_sets_max_snapshots(hass: HomeAssistant) -> None:
+    """The account options flow stores the snapshot-concurrency limit as an int."""
+    entry = _account_entry()
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "init"
+
+    with patch("custom_components.ezviz_stream.async_setup_entry", return_value=True):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_MAX_SNAPSHOTS: 3}
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_MAX_SNAPSHOTS] == 3
+    assert isinstance(entry.options[CONF_MAX_SNAPSHOTS], int)

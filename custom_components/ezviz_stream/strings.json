@@ -28,6 +28,20 @@
       "reauth_successful": "Re-authentication was successful."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "EZVIZ Stream options",
+        "description": "Tune how this integration talks to the EZVIZ cloud.",
+        "data": {
+          "max_concurrent_snapshots": "Max concurrent snapshot fetches"
+        },
+        "data_description": {
+          "max_concurrent_snapshots": "How many camera thumbnails may refresh from the cloud at the same time. 1 (the default) serialises them, which is safest against EZVIZ rate-limiting; raise it only if a multi-camera dashboard fills too slowly."
+        }
+      }
+    }
+  },
   "config_subentries": {
     "camera": {
       "title": "Add camera",

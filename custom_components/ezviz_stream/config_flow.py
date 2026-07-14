@@ -18,6 +18,7 @@ from homeassistant.config_entries import (
     ConfigFlow,
     ConfigFlowResult,
     ConfigSubentryFlow,
+    OptionsFlow,
     SubentryFlowResult,
 )
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
@@ -26,6 +27,9 @@ from homeassistant.data_entry_flow import section
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     BooleanSelector,
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -45,15 +49,18 @@ from .api import (
 )
 from .const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_MAX_SNAPSHOTS,
     CONF_REGION,
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
     CONF_STREAM,
     CONF_VERIFICATION_CODE,
+    DEFAULT_MAX_SNAPSHOTS,
     DEFAULT_REGION,
     DEFAULT_STREAM,
     DOMAIN,
     MAIN_STREAM,
+    MAX_MAX_SNAPSHOTS,
     REGION_API_CODES,
     SUB_STREAM,
 )
@@ -263,6 +270,47 @@ class EzvizStreamConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> dict[str, type[ConfigSubentryFlow]]:
         """Return the subentry flows this integration supports."""
         return {CAMERA_SUBENTRY_TYPE: CameraSubentryFlowHandler}
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: ConfigEntry,  # noqa: ARG004 - HA provides the entry via property
+    ) -> EzvizStreamOptionsFlow:
+        """Return the account-level options flow (cloud tuning knobs)."""
+        return EzvizStreamOptionsFlow()
+
+
+class EzvizStreamOptionsFlow(OptionsFlow):
+    """Account-level options: tune how the integration talks to the EZVIZ cloud."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show and store the account tuning options."""
+        if user_input is not None:
+            # NumberSelector yields a float; store an int for a clean semaphore size.
+            return self.async_create_entry(
+                data={CONF_MAX_SNAPSHOTS: int(user_input[CONF_MAX_SNAPSHOTS])}
+            )
+
+        current = self.config_entry.options.get(
+            CONF_MAX_SNAPSHOTS, DEFAULT_MAX_SNAPSHOTS
+        )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_MAX_SNAPSHOTS, default=current): NumberSelector(
+                        NumberSelectorConfig(
+                            min=1,
+                            max=MAX_MAX_SNAPSHOTS,
+                            step=1,
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                }
+            ),
+        )
 
 
 class CameraSubentryFlowHandler(ConfigSubentryFlow):

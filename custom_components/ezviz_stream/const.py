@@ -8,6 +8,16 @@ DOMAIN: Final = "ezviz_stream"
 
 # Account config-entry keys (username/password come from homeassistant.const).
 CONF_REGION: Final = "region"
+# Account-level tuning (options flow): how many camera thumbnails may refresh from
+# the cloud at once. A burst of grabs (a dashboard of camera cards cold-loading) can
+# overwhelm EZVIZ's signalling with churn (result 5405), so 1 - serialise them - is
+# the safest default; the last-motion-thumbnail option cuts battery-cam load further.
+# Raise cautiously if multi-camera thumbnail fill is too slow; back off if the hard
+# concurrency codes (5504/5546) appear. Gates only snapshot grabs - live streams are
+# one cloud session per camera and ungated.
+CONF_MAX_SNAPSHOTS: Final = "max_concurrent_snapshots"
+DEFAULT_MAX_SNAPSHOTS: Final = 1
+MAX_MAX_SNAPSHOTS: Final = 5
 
 # Camera subentries: the account is the config entry; each camera is a subentry
 # carrying its own serial and (optional) Image-Encryption verification code.

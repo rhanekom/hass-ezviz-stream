@@ -221,9 +221,32 @@ roadmap:
 - **Switches** - `PUT …/switchStatus` toggles privacy, sleep, all-day recording,
   auto-sleep, etc.
 - **Alarms / messages** - `GET /v3/alarms/v2/advanced`,
-  `GET /v3/unifiedmsg/list` for event history.
+  `GET /v3/unifiedmsg/list` for event history. See A.8.1 for the last-motion image.
 - **Push (MQTT)** - a separate app-key/secret channel for real-time
   notifications.
+
+### A.8.1 Last-motion / alarm image (battery-friendly thumbnail)
+
+A camera's most recent motion event carries a still image **already captured and
+stored in the cloud** - retrievable *without waking the camera or opening a media
+session*. That makes it an ideal thumbnail for a sleeping battery camera: polling a
+live frame wakes the camera on every cache expiry and drains it, whereas this image
+is free (already server-side) and refreshes whenever the camera detects motion.
+Trade-off: it is *last motion*, not *live*, so it can be stale between events.
+
+- **List endpoint:** `GET /v3/alarms/v2/advanced` with query params
+  `deviceSerials=<serial>&queryType=-1&limit=1&stype=-1` returns the most recent
+  alarm(s) (pyezvizapi `get_alarminfo(serial, limit=1)`; meta code `200` = OK,
+  `500` = server busy → retry). `limit=1` gives just the latest.
+- **Response:** an `alarms[]` list; each item carries a **`picUrl`** (the stored
+  snapshot - an HTTPS URL on an EZVIZ/OSS host), a `picChecksum`, and event
+  metadata (time, type).
+- **Fetch:** a plain HTTPS `GET picUrl` - no VTDU token, no handshake, no wake. The
+  bytes are a JPEG, possibly wrapped in the still-image encryption envelope
+  (B.10.2) when the camera has Image Encryption on.
+- **Decrypt:** if the payload contains the marker `hikencodepicture`, decrypt per
+  B.10.2 with the verification code; otherwise use the bytes verbatim (pyezvizapi
+  guards on `HIK_ENCRYPTION_HEADER in image_data` before decrypting).
 
 ---
 
@@ -566,6 +589,32 @@ that are not obvious from "AES-ECB the first 4096 bytes of each NAL":
 research item - decrypt on `0x01` with the verification code (AES-ECB; see B.11).
 The config flow should collect the verification code for any encrypted cam and
 auto-detect whether a stream is encrypted (decrypting a clear stream corrupts it).
+
+#### B.10.2 Still-image (alarm snapshot) encryption
+
+A **separate** scheme from the video payload one (B.10.1). It applies to stored
+**still images** - the alarm/motion snapshots behind `picUrl` (A.8.1) - when the
+camera has Image Encryption on. Per pyezvizapi `decrypt_image` (`utils.py`):
+
+- **Envelope marker:** the ASCII bytes `hikencodepicture` (16 B). If the payload
+  does not contain it, the image is plaintext - return as-is. Any preamble before
+  the first marker is trimmed. Several `hikencodepicture` blocks can be
+  concatenated in one file; each is decrypted independently and the parts joined.
+- **Per-block layout:** `hikencodepicture` (16 B) + **password hash** (32 B, ASCII
+  hex) + **AES-CBC ciphertext**.
+- **Password check:** the 32-byte hash must equal `md5(md5(code).hexdigest())` -
+  double MD5, hex-encoded, ASCII (`return_password_hash` in pyezvizapi). A mismatch
+  means the wrong verification code.
+- **Cipher:** **AES-128-CBC**. Key = the verification code zero-padded (`\x00`) to
+  16 bytes then truncated to 16. **Static IV** =
+  `30 31 32 33 34 35 36 37 00 00 00 00 00 00 00 00` (ASCII `"01234567"` + eight
+  nulls). The ciphertext is truncated to a 16-byte multiple before decrypt; the
+  final block is **PKCS#7-style** unpadded (last byte = pad length).
+
+Contrast with video (B.10.1): video is **AES-ECB, no IV, first 4096 B per NAL**;
+still images are **AES-CBC, fixed IV, whole payload, envelope + hash**. Same
+verification-code-derived key family, different mode and framing - so a still-image
+decryptor is a **new, small helper**, not reusable from `decrypt.py`.
 
 ### B.11 Operational realities
 

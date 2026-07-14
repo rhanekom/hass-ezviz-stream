@@ -12,7 +12,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import CannotConnect, EzvizCloudApi, InvalidAuth, MfaRequired
-from .const import CONF_REGION, DOMAIN
+from .const import CONF_MAX_SNAPSHOTS, CONF_REGION, DEFAULT_MAX_SNAPSHOTS, DOMAIN
 from .stream_view import EzvizStreamMediaView
 
 if TYPE_CHECKING:
@@ -21,16 +21,6 @@ if TYPE_CHECKING:
 PLATFORMS: list[Platform] = [Platform.CAMERA]
 
 _VIEW_REGISTERED = "view_registered"
-
-# Cap concurrent snapshot grabs account-wide. A burst of them (a dashboard of camera
-# cards cold-loading) can overwhelm EZVIZ's signalling with churn (result 5405). Kept
-# at 1 - serialise them, the most cloud-friendly setting - after a battery cam hit a
-# transient rate-limit at 2. The last-motion-thumbnail option cuts this load further
-# (battery cams then need no live grab for a thumbnail at all). Raise cautiously if
-# multi-camera thumbnail fill is too slow; back off if the hard concurrency codes
-# (5504/5546, logged by stream.open_stream) appear. Gates only snapshot grabs - live
-# streams are one cloud session per camera and ungated.
-MAX_CONCURRENT_SNAPSHOTS = 1
 
 
 @dataclass
@@ -58,8 +48,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: EzvizStreamConfigEntry) 
     except CannotConnect as err:
         raise ConfigEntryNotReady(str(err)) from err
 
+    max_snapshots = int(entry.options.get(CONF_MAX_SNAPSHOTS, DEFAULT_MAX_SNAPSHOTS))
     entry.runtime_data = EzvizStreamData(
-        api=api, snapshot_semaphore=asyncio.Semaphore(MAX_CONCURRENT_SNAPSHOTS)
+        api=api, snapshot_semaphore=asyncio.Semaphore(max_snapshots)
     )
     # Register the media view once per HA instance (serves every camera's stream).
     domain_data = hass.data.setdefault(DOMAIN, {})
