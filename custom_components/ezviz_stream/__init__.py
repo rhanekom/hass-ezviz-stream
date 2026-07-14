@@ -23,12 +23,14 @@ PLATFORMS: list[Platform] = [Platform.CAMERA]
 _VIEW_REGISTERED = "view_registered"
 
 # Cap concurrent snapshot grabs account-wide. A burst of them (a dashboard of camera
-# cards cold-loading) once overwhelmed EZVIZ's signalling with churn (result 5405),
-# not a hard cap - so a small count is fine. 2 is verified comfortable on a
-# multi-camera account (no 5504/5546); if those hard concurrency codes ever appear
-# (logged by stream.open_stream), back this off. This gates only snapshot grabs -
-# live streams are one cloud session per camera and ungated.
-MAX_CONCURRENT_SNAPSHOTS = 2
+# cards cold-loading) can overwhelm EZVIZ's signalling with churn (result 5405). Kept
+# at 1 - serialise them, the most cloud-friendly setting - after a battery cam hit a
+# transient rate-limit at 2. The last-motion-thumbnail option cuts this load further
+# (battery cams then need no live grab for a thumbnail at all). Raise cautiously if
+# multi-camera thumbnail fill is too slow; back off if the hard concurrency codes
+# (5504/5546, logged by stream.open_stream) appear. Gates only snapshot grabs - live
+# streams are one cloud session per camera and ungated.
+MAX_CONCURRENT_SNAPSHOTS = 1
 
 
 @dataclass
