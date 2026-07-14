@@ -31,7 +31,7 @@ dev = [
     "pytest-homeassistant-custom-component>=0.13.346",
     "scapy>=2.7.0",
     "pyezvizapi>=1.0.5.0",
-    "pyturbojpeg==1.8.3",
+    "pyturbojpeg==2.5.0",
     "ha-ffmpeg>=3.2.2",
     "pylint>=4.0.6",
     "isal>=1.8.0",
