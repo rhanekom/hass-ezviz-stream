@@ -47,6 +47,7 @@ from .api import (
     InvalidRegion,
     MfaRequired,
 )
+from .camera import persist_snapshot
 from .const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_IS_BATTERY,
@@ -685,7 +686,15 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
             )
         except CannotConnect, InvalidAuth, MfaRequired:
             return False
-        return jpeg is not None
+        if jpeg is None:
+            return False
+        # Seed the camera's snapshot with this confirmed frame so its tile shows at
+        # once after the reload, instead of blocking the first image request on a slow
+        # live grab (which HA's image timeout would abort, blanking the tile).
+        await self.hass.async_add_executor_job(
+            persist_snapshot, self.hass, data[CONF_SERIAL], jpeg
+        )
+        return True
 
     async def _async_api(self, entry: EzvizStreamConfigEntry) -> EzvizCloudApi:
         """Return the account's API client, reusing a loaded session if any."""

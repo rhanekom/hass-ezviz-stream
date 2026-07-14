@@ -118,6 +118,18 @@ def remove_snapshot_file(hass: HomeAssistant, serial: str) -> None:
     _remove_snapshot(_snapshot_path_for(hass, serial))
 
 
+def persist_snapshot(hass: HomeAssistant, serial: str, jpeg: bytes) -> None:
+    """
+    Seed a camera's last-good snapshot from an out-of-band grab (executor job).
+
+    Used by the config flow's frame check so a freshly added/reconfigured camera has a
+    thumbnail immediately: the entity restores this frame on the reload that follows,
+    instead of blocking the first image request on a slow live grab (which would blow
+    past Home Assistant's image timeout and blank the tile).
+    """
+    _write_snapshot(_snapshot_path_for(hass, serial), jpeg)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,  # noqa: ARG001 - platform setup signature fixed by HA
     entry: EzvizStreamConfigEntry,

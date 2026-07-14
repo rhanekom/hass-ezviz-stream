@@ -25,8 +25,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from Crypto.Cipher import AES
-
 MPEG_START_CODE_PREFIX = b"\x00\x00\x01"
 ANNEX_B_LONG_START_CODE = b"\x00\x00\x00\x01"
 NAL_ENCRYPTED_PREFIX_LEN = 4096
@@ -41,6 +39,10 @@ _PRIVATE_STREAM_2 = 0xBF
 
 
 def _aes(key: bytes) -> Any:  # AES.new returns an opaque ECB cipher object
+    # Imported here (not at module load) so integration setup does not pull in
+    # pycryptodome; decryption runs in a worker thread (called via to_thread).
+    from Crypto.Cipher import AES  # noqa: PLC0415
+
     return AES.new(key, AES.MODE_ECB)
 
 

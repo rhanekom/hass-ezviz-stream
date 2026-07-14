@@ -12,13 +12,12 @@ from __future__ import annotations
 
 from hashlib import md5
 
-from Crypto.Cipher import AES
-
 from .const import HIK_ENCRYPTION_HEADER
 
 _HEADER_LEN = len(HIK_ENCRYPTION_HEADER)
 _HASH_LEN = 32  # the on-wire password hash: ASCII-hex double-MD5 (32 chars)
 _BLOCK_PREFIX = _HEADER_LEN + _HASH_LEN
+_BLOCK_SIZE = 16  # AES block size (avoids importing pycryptodome for the constant)
 # Fixed IV: ASCII "01234567" followed by eight NUL bytes (16 bytes total).
 _IV = b"01234567" + bytes(8)
 _NO_PADDING = 0
@@ -47,7 +46,7 @@ def _password_hash(password: str) -> bytes:
 
 def _key(password: str) -> bytes:
     """Return the AES key: the code NUL-padded to and truncated at 16 bytes."""
-    return password.ljust(AES.block_size, "\x00")[: AES.block_size].encode()
+    return password.ljust(_BLOCK_SIZE, "\x00")[:_BLOCK_SIZE].encode()
 
 
 def _split_blocks(data: bytes) -> list[bytes]:
@@ -68,13 +67,17 @@ def _decrypt_block(block: bytes, password: str) -> bytes:
         msg = "wrong verification code"
         raise StillImageDecryptError(msg)
     ciphertext = block[_BLOCK_PREFIX:]
-    ciphertext = ciphertext[: len(ciphertext) - (len(ciphertext) % AES.block_size)]
+    ciphertext = ciphertext[: len(ciphertext) - (len(ciphertext) % _BLOCK_SIZE)]
     if not ciphertext:
         msg = "no ciphertext after alignment"
         raise StillImageDecryptError(msg)
+    # Import here (not at module load) so integration setup does not pull in
+    # pycryptodome; this runs in a worker thread (api/stream call it via to_thread).
+    from Crypto.Cipher import AES  # noqa: PLC0415
+
     plain = AES.new(_key(password), AES.MODE_CBC, _IV).decrypt(ciphertext)
     pad = plain[-1]  # PKCS#7-style: the last byte is the padding length
-    return plain[:-pad] if _NO_PADDING < pad <= AES.block_size else plain
+    return plain[:-pad] if _NO_PADDING < pad <= _BLOCK_SIZE else plain
 
 
 def decrypt_still_image(data: bytes, password: str) -> bytes:

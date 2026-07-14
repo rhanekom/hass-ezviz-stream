@@ -24,6 +24,7 @@ from custom_components.ezviz_stream.api import (
     InvalidRegion,
     MfaRequired,
 )
+from custom_components.ezviz_stream.camera import _snapshot_path_for
 from custom_components.ezviz_stream.config_flow import (
     CameraSubentryFlowHandler,
     _stored_interval,
@@ -219,6 +220,10 @@ async def test_add_camera_subentry(hass: HomeAssistant) -> None:
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Front door"
+    # The confirmed frame is persisted so the new camera's tile shows immediately.
+    snap = _snapshot_path_for(hass, "SN1")
+    assert snap.exists()
+    assert await hass.async_add_executor_job(snap.read_bytes) == b"jpeg-bytes"
     assert result["data"] == {
         CONF_SERIAL: "SN1",
         CONF_VERIFICATION_CODE: "ABCDEF",
