@@ -24,9 +24,9 @@ your dashboard, and it decrypts the video for cameras that have Image Encryption
 | | |
 |---|---|
 | ☁️ **Cloud live view** | WebRTC in the dashboard, for cameras with no usable local RTSP. |
-| 🔋 **Battery cameras** | Streams battery cams, with battery-aware defaults (sub stream + slower thumbnails). |
+| 🔋 **Battery cameras** | Streams battery cams, with battery-aware defaults (a no-wake motion-image thumbnail + sub stream) so they aren't woken just to fill a tile. |
 | 🔒 **Image Encryption** | Decrypts encrypted video on the fly, using the per-camera verification code. |
-| 🖼️ **Snapshots** | On-demand thumbnails, cached and kept across restarts. |
+| 🖼️ **Snapshots** | Pick the thumbnail source per camera (live snapshot, last cloud motion image, or a static frame); cached and kept across restarts. |
 | 🔌 **On-demand only** | A camera streams **only while someone is watching**, then stops - kind to batteries and to the EZVIZ cloud. |
 | ⚙️ **Set up from the UI** | Add, reconfigure, and re-authenticate cameras and the account from Settings; each save checks the settings by grabbing a real frame. |
 | 🏠 **Device-linked** | Camera entities attach to the same device as the official `ezviz` integration when it is installed. |
@@ -71,13 +71,25 @@ check the details before saving.
 
 On the account, use **Add camera**:
 
-1. **Pick the camera** from those found on your account.
-2. **Set its options:**
-    - **Verification code** - only needed if the camera has Image Encryption on;
-      leave it blank otherwise.
+1. **Pick the camera** from those found on your account (listed as *Name (Serial)*).
+2. **Set its options** (the form shows the camera's serial, whether it's a battery
+   camera, and whether Image Encryption is on):
+    - **Verification code** - the 6-character code on the camera's label. It's
+      **required** when the camera has Image Encryption on (and checked instantly, so a
+      wrong code is caught before any streaming), and **hidden** when the camera
+      reports no encryption.
     - **Advanced** (collapsed by default):
-        - **Slow thumbnail refresh** - fetch the still image less often. On by default
-          for battery cameras.
+        - **Thumbnail source** - how the camera tile is filled:
+            - *Live snapshot* - a fresh frame refreshed on a schedule (wakes battery
+              cameras).
+            - *Latest motion image* - the most recent cloud motion snapshot, with no
+              camera wake.
+            - *Static image* - captured once, then frozen.
+            - *Static, then newer motion images* - a static baseline that is replaced
+              only by motion newer than the last save (**the battery default**; save the
+              camera again to dismiss an unwanted image).
+        - **Thumbnail refresh interval** - how often a tile that's being viewed
+          refreshes (longer wakes battery cameras less often).
         - **Video stream** - **Main (HD)** or **Sub (lower resolution)**. Battery
           cameras default to **Sub** (gentler on the battery and on a weak connection).
 
@@ -89,8 +101,17 @@ stream is accepted silently.
 ### Changing a camera later
 
 Use the camera's **Reconfigure** action to change its verification code, thumbnail
-refresh, or stream. If your account password changes or expires, Home Assistant
-prompts you to **re-authenticate** without re-adding anything.
+source, refresh interval, or stream. (Saving a camera set to *Static, then newer
+motion images* also re-anchors it, dismissing any stale motion image.) If your account
+password changes or expires, Home Assistant prompts you to **re-authenticate** without
+re-adding anything.
+
+### Account options
+
+From the account's **Configure** action you can set **Max concurrent snapshot
+fetches** - how many camera thumbnails may refresh from the cloud at once. The default
+is **1** (serialised, safest against EZVIZ rate-limiting); raise it only if a
+multi-camera dashboard fills too slowly.
 
 ## How it works
 
@@ -125,7 +146,8 @@ local-network camera:
   a large dashboard, or several people watching at once, can still hit the limit.
   Symptoms: live view that won't start, stalled or blank tiles, and
   `concurrency/resource limit` warnings in the log. Ease it by watching fewer cameras at
-  once, keeping battery cams on slow-thumbnail refresh, and using the Sub stream.
+  once, keeping battery cams on the motion-image thumbnail (or a longer refresh
+  interval), and using the Sub stream.
 - **Live view has cloud latency.** A round-trip to the cloud is slower than local RTSP.
   WebRTC keeps latency low, but on a jittery or slow connection it will skip forward to
   stay live rather than lag smoothly (see [Tips](#tips-and-troubleshooting)).
@@ -149,8 +171,9 @@ local-network camera:
   while watched, but frequent or long viewing still adds up - use the Sub stream and
   keep sessions short.
 - **A thumbnail is briefly blank.** Thumbnails are cached and the last good image is kept
-  across restarts. A blank usually means a cold start on a battery camera that is slow to
-  wake, or Home Assistant refreshing the image link; it clears on the next refresh.
+  across restarts. A blank usually means a brand-new camera whose first frame hasn't been
+  captured yet, or a battery camera slow to wake; it fills in on the next refresh. Using
+  the **motion-image** thumbnail avoids waking the camera for a tile at all.
 - **`concurrency/resource limit` warnings in the log.** EZVIZ is refusing simultaneous
   streams - view or snapshot fewer cameras at once.
 - **Two-step verification.** If sign-in fails, make sure 2FA is turned off in the EZVIZ

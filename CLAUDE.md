@@ -105,6 +105,9 @@ EZVIZ cloud login → device list → VTDU tokens        # control plane (auth)
   hook audits `uv export --no-dev` — i.e. `[project].dependencies` only. HA's large
   transitive tree (the `dev` group) is deliberately excluded, since we don't
   control it. This is why runtime deps must go in `[project].dependencies`.
+- **Dependabot** (`.github/dependabot.yml`, `uv` ecosystem) updates dependencies but
+  **excludes `homeassistant`** — its version tracks the `hacs.json` floor, so a
+  Dependabot bump would break that.
 
 ## Dev Environment
 
