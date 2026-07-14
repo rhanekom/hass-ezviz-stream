@@ -21,6 +21,7 @@ from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_REGION,
     CONF_SERIAL,
+    CONF_SLOW_THUMBNAILS,
     CONF_VERIFICATION_CODE,
     DOMAIN,
 )
@@ -126,7 +127,7 @@ async def test_account_already_configured(hass: HomeAssistant) -> None:
 
 # --- camera subentry flow --------------------------------------------------- #
 async def test_add_camera_subentry(hass: HomeAssistant) -> None:
-    """Adding a camera creates a subentry with its serial and verification code."""
+    """Adding a (non-battery) camera: pick it, set its code, slow refresh off."""
     entry = _account_entry()
     entry.add_to_hass(hass)
 
@@ -138,16 +139,55 @@ async def test_add_camera_subentry(hass: HomeAssistant) -> None:
             (entry.entry_id, CAMERA_SUBENTRY_TYPE), context={"source": SOURCE_USER}
         )
         assert result["type"] is FlowResultType.FORM
+        assert result["step_id"] == "user"
 
         result = await hass.config_entries.subentries.async_configure(
-            result["flow_id"],
-            {CONF_SERIAL: "SN1", CONF_VERIFICATION_CODE: "ABCDEF"},
+            result["flow_id"], {CONF_SERIAL: "SN1"}
+        )
+        assert result["type"] is FlowResultType.FORM
+        assert result["step_id"] == "options"
+
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {CONF_VERIFICATION_CODE: "ABCDEF"}
         )
         await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Front door"
-    assert result["data"] == {CONF_SERIAL: "SN1", CONF_VERIFICATION_CODE: "ABCDEF"}
+    assert result["data"] == {
+        CONF_SERIAL: "SN1",
+        CONF_VERIFICATION_CODE: "ABCDEF",
+        CONF_SLOW_THUMBNAILS: False,  # SN1 is an IPC (mains) cam
+    }
+
+
+async def test_add_battery_camera_defaults_to_slow_thumbnails(
+    hass: HomeAssistant,
+) -> None:
+    """A battery camera defaults the slow-thumbnail refresh on in the options step."""
+    entry = _account_entry()
+    entry.add_to_hass(hass)
+
+    with (
+        _patch_api(),
+        patch("custom_components.ezviz_stream.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, CAMERA_SUBENTRY_TYPE), context={"source": SOURCE_USER}
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {CONF_SERIAL: "SN2"},  # the BatteryCamera
+        )
+        assert result["step_id"] == "options"
+        # Submit the options step accepting the defaults.
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {}
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_SLOW_THUMBNAILS] is True
 
 
 async def test_add_camera_aborts_when_all_added(hass: HomeAssistant) -> None:

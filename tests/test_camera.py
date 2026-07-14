@@ -19,6 +19,7 @@ from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_REGION,
     CONF_SERIAL,
+    CONF_SLOW_THUMBNAILS,
     CONF_VERIFICATION_CODE,
     DOMAIN,
     OFFICIAL_EZVIZ_DOMAIN,
@@ -147,6 +148,27 @@ async def test_snapshot_cached_within_ttl(hass: HomeAssistant) -> None:
     assert first == b"J" * 6000
     assert second == first
     assert grab.call_count == 1  # second call served from cache
+
+
+def test_slow_thumbnails_uses_longer_cache_ttl() -> None:
+    """The slow-thumbnails flag lengthens the snapshot cache TTL."""
+    entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(
+            api=AsyncMock(), stream_semaphore=asyncio.Semaphore(1)
+        )
+    )
+
+    def _cam(*, slow: bool) -> EzvizStreamCamera:
+        return EzvizStreamCamera(
+            entry,
+            SimpleNamespace(
+                data={CONF_SERIAL: "SN1", CONF_SLOW_THUMBNAILS: slow},
+                title="Cam",
+                subentry_id="x",
+            ),
+        )
+
+    assert _cam(slow=True)._cache_ttl > _cam(slow=False)._cache_ttl
 
 
 async def test_snapshot_persisted_and_restored_across_restart(

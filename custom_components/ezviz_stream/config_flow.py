@@ -23,6 +23,7 @@ from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -44,6 +45,7 @@ from .const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_REGION,
     CONF_SERIAL,
+    CONF_SLOW_THUMBNAILS,
     CONF_VERIFICATION_CODE,
     DEFAULT_REGION,
     DOMAIN,
@@ -124,10 +126,15 @@ class EzvizStreamConfigFlow(ConfigFlow, domain=DOMAIN):
 class CameraSubentryFlowHandler(ConfigSubentryFlow):
     """Add a camera (subentry) to an EZVIZ account entry."""
 
+    def __init__(self) -> None:
+        """Initialise the flow; the picked camera is carried between steps."""
+        super().__init__()
+        self._camera: EzvizCamera | None = None
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Pick a camera from the account and supply its verification code."""
+        """Pick a camera from the account, then configure it."""
         entry: EzvizStreamConfigEntry = self._get_entry()
 
         try:
@@ -145,16 +152,10 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
             return self.async_abort(reason="no_cameras")
 
         if user_input is not None:
-            serial = user_input[CONF_SERIAL]
-            camera = next(cam for cam in available if cam.serial == serial)
-            return self.async_create_entry(
-                title=camera.label,
-                unique_id=serial,
-                data={
-                    CONF_SERIAL: serial,
-                    CONF_VERIFICATION_CODE: user_input.get(CONF_VERIFICATION_CODE, ""),
-                },
+            self._camera = next(
+                cam for cam in available if cam.serial == user_input[CONF_SERIAL]
             )
+            return await self.async_step_options()
 
         schema = vol.Schema(
             {
@@ -167,12 +168,44 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
                         mode=SelectSelectorMode.DROPDOWN,
                     )
                 ),
-                vol.Optional(CONF_VERIFICATION_CODE, default=""): TextSelector(
-                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
-                ),
             }
         )
         return self.async_show_form(step_id="user", data_schema=schema)
+
+    async def async_step_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Supply the verification code and confirm the thumbnail-refresh cadence."""
+        camera = self._camera
+        assert camera is not None  # noqa: S101 - set by async_step_user before we get here
+
+        if user_input is not None:
+            return self.async_create_entry(
+                title=camera.label,
+                unique_id=camera.serial,
+                data={
+                    CONF_SERIAL: camera.serial,
+                    CONF_VERIFICATION_CODE: user_input.get(CONF_VERIFICATION_CODE, ""),
+                    CONF_SLOW_THUMBNAILS: user_input.get(CONF_SLOW_THUMBNAILS, False),
+                },
+            )
+
+        # Battery cams default to the slower cadence; the user can override it here.
+        schema = vol.Schema(
+            {
+                vol.Optional(CONF_VERIFICATION_CODE, default=""): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(
+                    CONF_SLOW_THUMBNAILS, default=camera.is_battery
+                ): BooleanSelector(),
+            }
+        )
+        return self.async_show_form(
+            step_id="options",
+            data_schema=schema,
+            description_placeholders={"camera": camera.label},
+        )
 
     async def _async_account_cameras(
         self, entry: EzvizStreamConfigEntry

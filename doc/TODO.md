@@ -165,11 +165,12 @@ the `stream` component ffmpeg-opens the same URL for HLS - one path fixes both.
       stale failure-fallback, so a tile never goes blank once a frame has been
       captured (chosen over pre-warm-on-startup, which would persist no imagery but
       show a blank until the first grab). Tested in `test_camera.py`.
-- [ ] **Battery-cam thumbnail refresh.** Detect battery cameras and give them a
-      slower snapshot refresh cadence than mains/IPC cams (each grab is a full cloud
-      session, and a sleeping battery cam is slow to wake / more likely to fail a grab
-      on a busy multi-camera view). Expose a checkbox in the camera subentry config
-      flow. Ties into the `_SNAPSHOT_CACHE_TTL` / snapshot path in `camera.py`.
+- [x] **Battery-cam thumbnail refresh.** Battery cams (`EzvizCamera.is_battery`,
+      `deviceCategory == "BatteryCamera"`) use a 5-min snapshot cache TTL vs 30 s for
+      mains/IPC (`camera._cache_ttl`), so a slow-to-wake cam is polled far less. The
+      camera subentry flow is now two-step (pick camera -> options) so the
+      `slow_thumbnails` checkbox defaults to the picked camera's battery status and the
+      user can override it. Tested in `test_config_flow.py` + `test_camera.py`.
 - [ ] **D.x - MJPEG serving mode (opt-in fallback).** An alternative to the default
       WebRTC-via-go2rtc path that needs no go2rtc/`stream` component and sidesteps
       HEVC-in-browser entirely (ffmpeg decodes to JPEG server-side). Override

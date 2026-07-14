@@ -14,8 +14,15 @@ CONF_REGION: Final = "region"
 CAMERA_SUBENTRY_TYPE: Final = "camera"
 CONF_SERIAL: Final = "serial"
 CONF_VERIFICATION_CODE: Final = "verification_code"
+# Poll this camera's thumbnail less often. Defaults on for battery cameras (slow to
+# wake, and each grab is a full cloud session), user-overridable in the subentry flow.
+CONF_SLOW_THUMBNAILS: Final = "slow_thumbnails"
 
 DEFAULT_REGION: Final = "Europe"
+
+# EZVIZ ``deviceCategory`` for battery-powered cameras (matches pyezvizapi's
+# DeviceCatagories.BATTERY_CAMERA_DEVICE_CATEGORY).
+BATTERY_CAMERA_CATEGORY: Final = "BatteryCamera"
 
 # Domain of the official Home Assistant `ezviz` integration. We reuse its device
 # identifier so our camera lands on the same device card when it is installed, and

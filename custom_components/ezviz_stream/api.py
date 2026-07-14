@@ -19,7 +19,7 @@ from typing import Any
 
 import aiohttp
 
-from .const import REGION_API_CODES
+from .const import BATTERY_CAMERA_CATEGORY, REGION_API_CODES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,6 +92,11 @@ class EzvizCamera:
     def is_online(self) -> bool:
         """Return True when the camera reports online (status 1)."""
         return self.status == 1
+
+    @property
+    def is_battery(self) -> bool:
+        """Return True for a battery-powered camera (slow to wake)."""
+        return self.category == BATTERY_CAMERA_CATEGORY
 
     @property
     def label(self) -> str:

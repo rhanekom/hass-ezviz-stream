@@ -32,10 +32,17 @@
       "step": {
         "user": {
           "title": "Add camera",
-          "description": "Choose a camera to stream. If it has Image Encryption enabled, enter its verification code (the 6-character code on the camera label); leave blank otherwise.",
+          "description": "Choose a camera to stream.",
           "data": {
-            "serial": "Camera",
-            "verification_code": "Verification code (encryption password)"
+            "serial": "Camera"
+          }
+        },
+        "options": {
+          "title": "Camera options",
+          "description": "Configure {camera}. If it has Image Encryption enabled, enter its verification code (the 6-character code on the camera label); leave blank otherwise.",
+          "data": {
+            "verification_code": "Verification code (encryption password)",
+            "slow_thumbnails": "Slow thumbnail refresh (recommended for battery cameras)"
           }
         }
       },

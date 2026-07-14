@@ -18,6 +18,7 @@ from .broadcast import CameraBroadcast, mpegts_source
 from .const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_SERIAL,
+    CONF_SLOW_THUMBNAILS,
     CONF_VERIFICATION_CODE,
     MANUFACTURER,
     OFFICIAL_EZVIZ_DOMAIN,
@@ -33,8 +34,10 @@ _SNAPSHOT_TIMEOUT = 30.0
 _SNAPSHOT_MAX_SESSIONS = 3  # limit reconnect churn per image request
 _MAIN_STREAM = 1
 # Serve a cached frame for this long so HA's image polling does not re-stream on
-# every poll (each grab is a full cloud session).
+# every poll (each grab is a full cloud session). Battery cams (and any camera the
+# user flags) use the slower cadence - they wake slowly and streaming drains them.
 _SNAPSHOT_CACHE_TTL = 30.0
+_SNAPSHOT_CACHE_TTL_SLOW = 300.0
 # The last good frame is persisted here so a cold start (the in-memory cache is empty
 # after a restart) falls back to it instead of a blank tile until a fresh grab
 # succeeds. It is camera imagery at rest: kept in the HA config dir, owner-only
@@ -101,6 +104,7 @@ class EzvizStreamCamera(Camera):
         self._entry = entry
         self._serial: str = subentry.data[CONF_SERIAL]
         self._verification_code: str = subentry.data.get(CONF_VERIFICATION_CODE, "")
+        self._slow_thumbnails: bool = subentry.data.get(CONF_SLOW_THUMBNAILS, False)
         self._stream_index: int = _MAIN_STREAM
         self._attr_unique_id = self._serial
         self._image: bytes | None = None  # last decoded frame (snapshot cache)
@@ -134,6 +138,13 @@ class EzvizStreamCamera(Camera):
     def _snapshot_path(self) -> Path:
         """Path to this camera's persisted last-good frame."""
         return Path(self.hass.config.path(_SNAPSHOT_DIR)) / f"{self._serial}.jpg"
+
+    @property
+    def _cache_ttl(self) -> float:
+        """How long a grabbed frame stays fresh (longer for slow/battery cams)."""
+        return (
+            _SNAPSHOT_CACHE_TTL_SLOW if self._slow_thumbnails else _SNAPSHOT_CACHE_TTL
+        )
 
     async def async_added_to_hass(self) -> None:
         """Register the broadcaster and restore the last frame as a failure fallback."""
@@ -184,7 +195,7 @@ class EzvizStreamCamera(Camera):
         """
         if (
             self._image is not None
-            and time.monotonic() - self._image_at < _SNAPSHOT_CACHE_TTL
+            and time.monotonic() - self._image_at < self._cache_ttl
         ):
             return self._image
 
@@ -192,7 +203,7 @@ class EzvizStreamCamera(Camera):
             # Another waiter may have just refreshed while we waited for the lock.
             if (
                 self._image is not None
-                and time.monotonic() - self._image_at < _SNAPSHOT_CACHE_TTL
+                and time.monotonic() - self._image_at < self._cache_ttl
             ):
                 return self._image
 
