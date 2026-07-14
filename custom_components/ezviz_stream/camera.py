@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
@@ -33,6 +35,12 @@ _MAIN_STREAM = 1
 # Serve a cached frame for this long so HA's image polling does not re-stream on
 # every poll (each grab is a full cloud session).
 _SNAPSHOT_CACHE_TTL = 30.0
+# The last good frame is persisted here so a cold start (the in-memory cache is empty
+# after a restart) falls back to it instead of a blank tile until a fresh grab
+# succeeds. It is camera imagery at rest: kept in the HA config dir, owner-only
+# (0600), one small JPEG per camera; removed when the camera is removed.
+_SNAPSHOT_DIR = "ezviz_stream"
+_SNAPSHOT_FILE_MODE = 0o600
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -42,6 +50,27 @@ if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
     from . import EzvizStreamConfigEntry
+
+
+def _write_snapshot(path: Path, data: bytes) -> None:
+    """Persist the latest frame, owner-only (executor job)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _SNAPSHOT_FILE_MODE)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+
+
+def _read_snapshot(path: Path) -> bytes | None:
+    """Return the persisted frame, or None if there is none (executor job)."""
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _remove_snapshot(path: Path) -> None:
+    """Delete the persisted frame if present (executor job)."""
+    path.unlink(missing_ok=True)
 
 
 async def async_setup_entry(
@@ -101,14 +130,28 @@ class EzvizStreamCamera(Camera):
             verification_code=self._verification_code,
         )
 
+    @property
+    def _snapshot_path(self) -> Path:
+        """Path to this camera's persisted last-good frame."""
+        return Path(self.hass.config.path(_SNAPSHOT_DIR)) / f"{self._serial}.jpg"
+
     async def async_added_to_hass(self) -> None:
-        """Register this camera's broadcaster so the media view can serve it."""
+        """Register the broadcaster and restore the last frame as a failure fallback."""
         register_stream(self.hass, self._serial, self._token, self._broadcast)
+        # Restore for failure-fallback only: leave _image_at at 0 so the frame is
+        # treated as stale and the next request still attempts a fresh grab, falling
+        # back to the restored frame only if that grab fails (no cold-start blank).
+        restored = await self.hass.async_add_executor_job(
+            _read_snapshot, self._snapshot_path
+        )
+        if restored is not None and self._image is None:
+            self._image = restored
 
     async def async_will_remove_from_hass(self) -> None:
-        """Deregister and stop this camera's broadcaster."""
+        """Deregister, stop the broadcaster, and delete the persisted frame."""
         unregister_stream(self.hass, self._serial)
         await self._broadcast.async_stop()
+        await self.hass.async_add_executor_job(_remove_snapshot, self._snapshot_path)
 
     async def stream_source(self) -> str:
         """
@@ -136,7 +179,8 @@ class EzvizStreamCamera(Camera):
         Grabbing drives login -> handshake -> media -> decode (seconds), so results
         are cached for ``_SNAPSHOT_CACHE_TTL`` and grabs are serialised account-wide
         (a dashboard of cameras must not open concurrent VTDU sessions). On failure
-        the last known frame is returned. Continuous live view arrives with go2rtc.
+        the last known frame is returned - including one restored from disk across a
+        restart - so a tile never goes blank once a frame has ever been captured.
         """
         if (
             self._image is not None
@@ -178,4 +222,7 @@ class EzvizStreamCamera(Camera):
             if jpeg is not None:
                 self._image = jpeg
                 self._image_at = time.monotonic()
+                await self.hass.async_add_executor_job(
+                    _write_snapshot, self._snapshot_path, jpeg
+                )
             return self._image

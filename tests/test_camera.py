@@ -149,6 +149,50 @@ async def test_snapshot_cached_within_ttl(hass: HomeAssistant) -> None:
     assert grab.call_count == 1  # second call served from cache
 
 
+async def test_snapshot_persisted_and_restored_across_restart(
+    hass: HomeAssistant,
+) -> None:
+    """A grabbed frame is written to disk and a fresh entity restores it as fallback."""
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(
+        return_value=[EzvizCamera("SN1", "Front door", "IPC", 1, 1, streamable=True)]
+    )
+    entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(api=api, stream_semaphore=asyncio.Semaphore(1))
+    )
+    subentry = SimpleNamespace(
+        data={CONF_SERIAL: "SN1", CONF_VERIFICATION_CODE: ""},
+        title="Front door",
+        subentry_id="x",
+    )
+    cam1 = EzvizStreamCamera(entry, subentry)
+    cam1.hass = hass
+
+    with (
+        patch(
+            "custom_components.ezviz_stream.camera.grab_jpeg",
+            AsyncMock(return_value=b"J" * 6000),
+        ),
+        patch(
+            "custom_components.ezviz_stream.camera.get_ffmpeg_manager",
+            return_value=SimpleNamespace(binary="ffmpeg"),
+        ),
+    ):
+        assert await cam1.async_camera_image() == b"J" * 6000
+    assert cam1._snapshot_path.exists()  # persisted on a successful grab
+
+    # A fresh entity (same serial, e.g. after a restart) restores the frame on add.
+    cam2 = EzvizStreamCamera(entry, subentry)
+    cam2.hass = hass
+    await cam2.async_added_to_hass()
+    assert cam2._image == b"J" * 6000
+    assert cam2._image_at == 0.0  # stale, so a fresh grab is still attempted first
+
+    # Removing the camera deletes the persisted frame.
+    await cam2.async_will_remove_from_hass()
+    assert not cam2._snapshot_path.exists()
+
+
 async def test_stream_source_and_registry_lifecycle(hass: HomeAssistant) -> None:
     """stream_source is a token-guarded local HTTP URL; add/remove (de)registers it."""
     entry = SimpleNamespace(

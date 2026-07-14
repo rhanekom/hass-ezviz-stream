@@ -152,12 +152,24 @@ the `stream` component ffmpeg-opens the same URL for HLS - one path fixes both.
 - [ ] Options flow (codec, main/sub stream, **serving mode**); reauth flow;
       diagnostics. (Frame-rate handling is solved by RTP-timestamp pacing - no fps
       option needed.)
+- [ ] **OPEN DECISION - live buffer methodology.** With RTP-timestamp pacing the
+      source timeline is correct, but the player can still chase the live edge
+      (WebRTC minimises latency and skips/"catches up" rather than lagging steadily).
+      Decide the preferred behaviour and how to get it: (a) accept WebRTC catch-up;
+      (b) force a small fixed playout buffer so it lags by a constant amount; (c) offer
+      a buffer-and-lag transport (MJPEG/HLS) for cams/setups where smooth-but-delayed
+      beats low-latency-but-skippy. Revisit once the pacing change has been evaluated
+      live. (Discussed 2026-07-14.)
+- [x] **Snapshot retained on failure, across restarts.** `camera.py` persists the last
+      good frame (owner-only JPEG in the config dir) and restores it on add as a
+      stale failure-fallback, so a tile never goes blank once a frame has been
+      captured (chosen over pre-warm-on-startup, which would persist no imagery but
+      show a blank until the first grab). Tested in `test_camera.py`.
 - [ ] **Battery-cam thumbnail refresh.** Detect battery cameras and give them a
       slower snapshot refresh cadence than mains/IPC cams (each grab is a full cloud
-      session, and a sleeping battery cam is slow to wake / more likely to return a
-      blank first frame on a busy multi-camera view). Expose an opt-in checkbox in the
-      camera subentry config flow. Ties into the `_SNAPSHOT_CACHE_TTL` / snapshot path
-      in `camera.py`.
+      session, and a sleeping battery cam is slow to wake / more likely to fail a grab
+      on a busy multi-camera view). Expose a checkbox in the camera subentry config
+      flow. Ties into the `_SNAPSHOT_CACHE_TTL` / snapshot path in `camera.py`.
 - [ ] **D.x - MJPEG serving mode (opt-in fallback).** An alternative to the default
       WebRTC-via-go2rtc path that needs no go2rtc/`stream` component and sidesteps
       HEVC-in-browser entirely (ffmpeg decodes to JPEG server-side). Override
