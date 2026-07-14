@@ -490,6 +490,15 @@ append their payload (from byte 3). On the end fragment, flush the completed NAL
 > documented in `specification.md §4.1`. The output is a clean Annex-B HEVC
 > elementary stream FFmpeg reads directly with `-f hevc`.
 
+> **Timing: the RTP timestamp is the only presentation clock.** The depacketized
+> Annex-B elementary stream carries **no timing** of its own - fed to `ffmpeg -f hevc`
+> raw, FFmpeg assumes a default 25 fps and runs the playback clock too fast (the buffer
+> drains and the player rebuffers). The RTP header's 32-bit **timestamp (90 kHz)** is
+> the camera's real presentation clock, so downstream must supply timing from it. We
+> pace released frames to that timestamp (rebasing to "now" on a reconnect's fresh RTP
+> base or a 32-bit wrap), which reproduces the true capture cadence. MPEG-PS does not
+> need this - it carries its own PTS.
+
 ### B.9 Codecs & container summary
 
 - **Video:** H.265/HEVC (RTP models) and H.264/AVC and HEVC inside MPEG-PS.
@@ -499,11 +508,11 @@ append their payload (from byte 3). On the end fragment, flush the completed NAL
   see B.11.*)*
 - **Audio:** present in MPEG-PS streams; RTP audio is unresolved (video-only in
   practice, likely G.711 when present).
-- **Downstream:** feed the reconstructed elementary stream to FFmpeg. Default to
-  an **on-demand HEVC→H.264 transcode** (`libx264 -preset veryfast -tune
-  zerolatency`) for universal browser playback; native HEVC (no transcode) is a
-  config option for Safari/iOS clients. MPEG-PS input can be handed to FFmpeg more
-  directly.
+- **Downstream:** the reconstructed elementary stream is remuxed to MPEG-TS with
+  FFmpeg (`-c copy`) and handed to go2rtc, which does the **HEVC→H.264 transcode**
+  for the browser (WebRTC) on demand. A native-HEVC (no-transcode) path for
+  Safari/iOS is a possible config option. MPEG-PS is remuxed the same way, and its
+  PTS is preserved.
 
 ### B.10 Encryption
 
@@ -526,6 +535,32 @@ completeness but is not implemented and is not needed for the cameras we support
    zero-padded to 16 bytes (no IV), and the media stays on channel `0x01`. StreamInfoRsp exposes `datakey` and
    `aesmd5` that likely bind/verify the AES key; devices also expose a
    "permanent key" thought to derive (not be) the stream key.
+
+#### B.10.1 MPEG-PS Image-Encryption byte structure (as implemented)
+
+Decrypting correctly - and incrementally, on a live stream - depends on framing rules
+that are not obvious from "AES-ECB the first 4096 bytes of each NAL":
+
+- **The cipher stream is the concatenation of the video-PES *payloads*, not the raw
+  container.** AES 16-byte blocks accumulate **across** contiguous video-PES packets;
+  the MPEG-PS framing bytes between payloads (pack/PES headers) are skipped, never fed
+  to the cipher. A single NAL body routinely spans several video-PES packets.
+- **A "run" is the atomic unit, and it resets on a non-video PES packet.** Metadata
+  packets (pack header `BA`, system header `BB`, program-stream-map `BC`, padding
+  `BE`) do **not** break a run; an audio / private PES (`C0`-`DF`, `BD`, `BF`) does.
+  The 4096-byte counter and the AES-block alignment reset at each run boundary.
+- **The 4096-byte encrypted prefix is per NAL**, measured from
+  `<start-code> + nalu_header_size`; the counter resets at every NAL start code found
+  within the run.
+- **`nalu_header_size`** (clear codec-header bytes kept before the AES region) is **2**
+  for HEVC, **1** for H.264 with a clear NAL header, and **0** for H.264 whose NAL
+  header is itself encrypted (observed on our IPC cams). It is auto-detected by
+  trial-decrypting candidate NAL headers and scoring which interpretation yields the
+  most plausible headers.
+- **Consequence for live decryption:** a streaming decryptor can only cut and emit at a
+  **video-PES run boundary** (where the AES state resets); the still-open last run must
+  be buffered. `decrypt.StreamingPsDecryptor` does exactly this and is validated
+  byte-for-byte against the one-shot `decrypt_ps_video` across arbitrary chunk splits.
 
 **Recommendation (updated 2026-07-13):** encryption support is **proven**, not a
 research item - decrypt on `0x01` with the verification code (AES-ECB; see B.11).
@@ -568,6 +603,13 @@ auto-detect whether a stream is encrypted (decrypting a clear stream corrupts it
   cams need neither - their streams are in the clear. Alternatively a user can
   **disable Image Encryption** on the device for a clear stream. Tooling:
   `ezviz_stream_probe.py --stream 2 --verify-code <code>` (or `EZVIZ_VERIFY_CODE`).
+- **Account concurrency is limited, and churn is not the cap.** A burst of
+  simultaneous session opens - a dashboard cold-loading many snapshots at once - trips
+  `5405` (signalling/CAS timeout), a *churn* symptom that clears once requests are
+  spaced or serialised, well before the true per-account / per-VTDU concurrency ceiling
+  (`5504`/`5546`, B.12). Share **one** session per camera (fanned out to all viewers),
+  rate-limit snapshot grabs, and treat `5504`/`5546` - not `5405` - as the signal that
+  the account is genuinely out of stream slots.
 - **On-demand only.** Continuous streaming destroys battery runtime. Stream **only
   while a client is watching** and stop on idle (e.g. a short idle timeout after
   the last viewer disconnects) - never 24/7.
