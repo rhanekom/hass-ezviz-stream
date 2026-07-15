@@ -10,6 +10,7 @@ without the cloud.
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -318,6 +319,114 @@ async def test_decode_jpeg_rejects_tiny_output() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# capture_jpeg_from_ts (keyframe capture from a live MPEG-TS tap)
+# --------------------------------------------------------------------------- #
+class _FakeStdin:
+    """A minimal StreamWriter stand-in recording what the feeder writes to FFmpeg."""
+
+    def __init__(self) -> None:
+        self.written = bytearray()
+        self.closed = False
+        self.closed_event = asyncio.Event()
+
+    def write(self, data: bytes) -> None:
+        self.written.extend(data)
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+        self.closed_event.set()
+
+
+def _fake_ffmpeg_proc(
+    stdout: bytes = b"", *, hang: bool = False, returncode: int | None = 0
+) -> Mock:
+    """A fake FFmpeg subprocess for capture_jpeg_from_ts (stdin feed + stdout read)."""
+    proc = Mock()
+    stdin = _FakeStdin()
+    proc.stdin = stdin
+    proc.returncode = returncode
+    proc.kill = Mock()
+    proc.wait = AsyncMock()
+
+    async def _hang() -> bytes:  # never resolves; asyncio.wait_for must time out
+        await asyncio.Event().wait()
+        return b""
+
+    async def _emit_after_feed() -> bytes:
+        # Real FFmpeg emits the frame only after it has been fed; mirror that by
+        # waiting for the feeder to finish (it closes stdin) so the feed actually runs.
+        await stdin.closed_event.wait()
+        return stdout
+
+    proc.stdout = Mock(read=_hang if hang else _emit_after_feed)
+    return proc
+
+
+async def _ts_source(*chunks: bytes):  # noqa: ANN202 - test async generator
+    for chunk in chunks:
+        yield chunk
+
+
+async def test_capture_jpeg_from_ts_returns_keyframe() -> None:
+    """A keyframe of adequate size is returned, and the source is fed into FFmpeg."""
+    jpeg = b"\xff" * stream._MIN_JPEG_BYTES
+    proc = _fake_ffmpeg_proc(jpeg)
+    with patch.object(
+        stream.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ):
+        out = await stream.capture_jpeg_from_ts(
+            "ffmpeg", _ts_source(b"aa", b"bb"), timeout=1.0
+        )
+    assert out == jpeg
+    assert bytes(proc.stdin.written) == b"aabb"  # the live tap was piped in
+    assert proc.stdin.closed  # feeder closes stdin so FFmpeg finalises
+    proc.wait.assert_awaited()
+
+
+async def test_capture_jpeg_from_ts_rejects_tiny_output() -> None:
+    """Sub-threshold output (a decode artifact / empty tap) yields None."""
+    proc = _fake_ffmpeg_proc(b"tiny")
+    with patch.object(
+        stream.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ):
+        out = await stream.capture_jpeg_from_ts("ffmpeg", _ts_source(b"x"), timeout=1.0)
+    assert out is None
+
+
+async def test_capture_jpeg_from_ts_returns_none_on_timeout() -> None:
+    """No keyframe within the budget returns None and kills the running FFmpeg."""
+    proc = _fake_ffmpeg_proc(hang=True, returncode=None)
+    with patch.object(
+        stream.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ):
+        out = await stream.capture_jpeg_from_ts(
+            "ffmpeg", _ts_source(b"x"), timeout=0.01
+        )
+    assert out is None
+    proc.kill.assert_called_once()  # a still-running decoder is reaped
+
+
+async def test_capture_jpeg_from_ts_survives_source_error() -> None:
+    """A source that errors mid-feed is swallowed; a produced keyframe still returns."""
+    jpeg = b"\xff" * stream._MIN_JPEG_BYTES
+    proc = _fake_ffmpeg_proc(jpeg)
+
+    async def _bad_source():  # noqa: ANN202
+        yield b"aa"
+        raise ConnectionResetError
+
+    with patch.object(
+        stream.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ):
+        out = await stream.capture_jpeg_from_ts("ffmpeg", _bad_source(), timeout=1.0)
+    assert out == jpeg
+    assert proc.stdin.closed
+
+
+# --------------------------------------------------------------------------- #
 # grab_jpeg
 # --------------------------------------------------------------------------- #
 async def test_grab_jpeg_success_first_session() -> None:
@@ -430,6 +539,67 @@ async def test_iter_annexb_backoff_on_handshake_error() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# _SessionTrace (per-session diagnostics)
+# --------------------------------------------------------------------------- #
+async def test_session_trace_summary_logs_metrics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A full session logs decomposed timings, counts and the drop reason."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.ezviz_stream.stream")
+    now = 100.0
+
+    def clock() -> float:
+        return now
+
+    trace = stream._SessionTrace("rtp", "SN1", 3, clock=clock, gap=2.0)
+    now = 100.5  # handshake took 0.5 s
+    trace.ready()
+    now = 101.0  # first frame 0.5 s after the handshake
+    trace.media(1000)
+    trace.media(500)
+    trace.keepalive()
+    trace.control(0x140)  # a control-channel frame from the server
+    now = 128.0  # ~27 s of media, then the drop
+    trace.log("peer-closed")
+
+    msg = caplog.text
+    assert "SN1 session #3 [rtp]" in msg
+    assert "gap=2.0s" in msg
+    assert "handshake=500ms" in msg
+    assert "ttff=500ms" in msg
+    assert "live=27.5s" in msg
+    assert "frames=2" in msg
+    assert "bytes=1500" in msg
+    assert "keepalive=1" in msg
+    assert "control={320: 1}" in msg  # 0x140 == 320
+    assert "drop=peer-closed" in msg
+
+
+async def test_session_trace_marks_missing_media(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A session that never delivered media shows ttff=- and no gap/control."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.ezviz_stream.stream")
+    now = 10.0
+
+    def clock() -> float:
+        return now
+
+    trace = stream._SessionTrace("ps", "SN2", 1, clock=clock, gap=None)
+    now = 10.2
+    trace.ready()
+    now = 15.2
+    trace.log("peer-closed")
+
+    msg = caplog.text
+    assert "SN2 session #1 [ps]" in msg
+    assert "gap=-" in msg
+    assert "ttff=-" in msg
+    assert "frames=0" in msg
+    assert "control={}" in msg
+
+
+# --------------------------------------------------------------------------- #
 # iter_ps_decrypted
 # --------------------------------------------------------------------------- #
 async def test_iter_ps_decrypted_passthrough_without_code() -> None:
@@ -519,4 +689,23 @@ async def test_iter_annexb_gives_up_after_repeated_handshake_failures() -> None:
         ]
 
     assert chunks == []  # nothing streamed, and the generator terminated (no hang)
+    assert open_stream.await_count == stream._MAX_STREAM_FAILURES
+
+
+async def test_iter_ps_decrypted_gives_up_after_repeated_handshake_failures() -> None:
+    """The PS iterator is bounded too: an offline IPC camera stops reconnecting."""
+    with (
+        patch.object(
+            stream, "open_stream", AsyncMock(side_effect=stream.StreamError("offline"))
+        ) as open_stream,
+        patch.object(stream, "_RETRY_BACKOFF", 0),
+    ):
+        chunks = [
+            chunk
+            async for chunk in stream.iter_ps_decrypted(
+                _camera(), AsyncMock(return_value="tok"), stream=1, verification_code=""
+            )
+        ]
+
+    assert chunks == []
     assert open_stream.await_count == stream._MAX_STREAM_FAILURES

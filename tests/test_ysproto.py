@@ -41,6 +41,31 @@ def test_read_frame_incomplete_keeps_partial() -> None:
     assert consumed == 0  # keep everything from the magic
 
 
+def test_build_keepalive_wraps_ssn_as_protobuf() -> None:
+    """The keepalive body must be the ssn as protobuf field 1, not the raw string.
+
+    Packet capture of the official client showed a 0x0a/0x33-prefixed body; sending
+    the raw string instead makes the VTDU FIN the connection (~5.5 s session churn).
+    """
+    frame = ysproto.build_keepalive("ABC", seq=1)
+    # magic 24, channel 00 (control), len 0x0005, seq 0x0001, msgcode 0x0132, body.
+    assert frame == bytes.fromhex("2400000500010132") + b"\x0a\x03ABC"
+
+    parsed, _ = ysproto.read_frame(frame)
+    assert parsed is not None
+    channel, msgcode, body = parsed
+    assert channel == ysproto.CH_MSG
+    assert msgcode == ysproto.MSG_KEEPALIVE_REQ
+    assert body == b"\x0a\x03ABC"  # protobuf field 1 = the ssn
+    assert body != b"ABC"  # regression: the raw string body is fatal
+
+
+def test_build_keepalive_defaults_seq_zero() -> None:
+    """Seq defaults to 0 and is honoured when passed (official client increments it)."""
+    assert ysproto.build_keepalive("X")[4:6] == b"\x00\x00"
+    assert ysproto.build_keepalive("X", seq=7)[4:6] == b"\x00\x07"
+
+
 # --- protobuf --------------------------------------------------------------- #
 def test_streaminforeq_protobuf_roundtrip() -> None:
     body = ysproto.encode_streaminforeq("ysproto://host/live?dev=X", "vtmkey")

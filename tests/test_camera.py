@@ -1019,6 +1019,16 @@ async def test_stream_source_never_refuses_battery_camera(hass: HomeAssistant) -
     api.async_get_cameras.assert_not_called()  # no lookup: never gate a battery wake
 
 
+async def test_stream_source_fails_open_when_lookup_errors(hass: HomeAssistant) -> None:
+    """A control-plane hiccup during the offline check must not block streaming."""
+    api = AsyncMock(async_get_cameras=AsyncMock(side_effect=RuntimeError("cloud down")))
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1", CONF_IS_BATTERY: False}, api=api)
+    hass.http = SimpleNamespace(server_port=8123)
+
+    url = await camera.stream_source()  # the lookup raised; we still serve the URL
+    assert "/api/ezviz_stream/SN1?token=" in url
+
+
 async def test_removal_stops_orphaned_ha_stream(hass: HomeAssistant) -> None:
     """Removing a camera tears down its HA Stream so it stops retrying the dead URL."""
     camera = _make_camera(hass, {CONF_SERIAL: "SN1"})
