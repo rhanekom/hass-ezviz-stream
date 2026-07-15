@@ -69,12 +69,14 @@
               "data": {
                 "thumbnail_mode": "Thumbnail source",
                 "snapshot_interval": "Thumbnail refresh interval (seconds)",
-                "stream": "Video stream"
+                "stream": "Video stream",
+                "force_h264": "Transcode to H.264 (compatibility)"
               },
               "data_description": {
                 "thumbnail_mode": "How the camera tile is filled. Live snapshot refreshes on the interval below and wakes battery cameras. Latest motion image uses the most recent cloud motion snapshot with no wake. Static image shows the last frame from a live view and refreshes for free whenever you open the stream (it never wakes the camera on its own). 'Static, then newer motion images' keeps that static shot but shows any motion event newer than the last time you saved this camera - the battery default; save again to dismiss an unwanted image.",
                 "snapshot_interval": "How often a viewed thumbnail refreshes. A longer interval wakes battery cameras less often. Applies to the live snapshot and motion-image sources, not the static image.",
-                "stream": "For battery cameras the lower-res Sub stream is recommended: it uses less bandwidth and is gentler on the battery and a weak connection."
+                "stream": "For battery cameras the lower-res Sub stream is recommended: it uses less bandwidth and is gentler on the battery and a weak connection.",
+                "force_h264": "Leave this off unless live view will not play in your browser. Home Assistant's built-in go2rtc already converts the camera's native HEVC to H.264 for browsers on demand, at no extra cost. Turning this on makes the server re-encode the video continuously whenever the camera is watched, which is CPU-intensive - roughly a full CPU core per 1080p camera, enough to overload a low-power host such as a Raspberry Pi when several cameras are viewed. Prefer the Sub stream above, and enable this only on cameras you actually watch in a browser."
               }
             }
           }
@@ -91,12 +93,14 @@
               "data": {
                 "thumbnail_mode": "Thumbnail source",
                 "snapshot_interval": "Thumbnail refresh interval (seconds)",
-                "stream": "Video stream"
+                "stream": "Video stream",
+                "force_h264": "Transcode to H.264 (compatibility)"
               },
               "data_description": {
                 "thumbnail_mode": "How the camera tile is filled. Live snapshot refreshes on the interval below and wakes battery cameras. Latest motion image uses the most recent cloud motion snapshot with no wake. Static image shows the last frame from a live view and refreshes for free whenever you open the stream (it never wakes the camera on its own). 'Static, then newer motion images' keeps that static shot but shows any motion event newer than the last time you saved this camera - the battery default; save again to dismiss an unwanted image.",
                 "snapshot_interval": "How often a viewed thumbnail refreshes. A longer interval wakes battery cameras less often. Applies to the live snapshot and motion-image sources, not the static image.",
-                "stream": "For battery cameras the lower-res Sub stream is recommended: it uses less bandwidth and is gentler on the battery and a weak connection."
+                "stream": "For battery cameras the lower-res Sub stream is recommended: it uses less bandwidth and is gentler on the battery and a weak connection.",
+                "force_h264": "Leave this off unless live view will not play in your browser. Home Assistant's built-in go2rtc already converts the camera's native HEVC to H.264 for browsers on demand, at no extra cost. Turning this on makes the server re-encode the video continuously whenever the camera is watched, which is CPU-intensive - roughly a full CPU core per 1080p camera, enough to overload a low-power host such as a Raspberry Pi when several cameras are viewed. Prefer the Sub stream above, and enable this only on cameras you actually watch in a browser."
               }
             }
           }

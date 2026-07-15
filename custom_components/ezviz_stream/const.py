@@ -73,6 +73,14 @@ MAIN_STREAM: Final = 1
 SUB_STREAM: Final = 2
 DEFAULT_STREAM: Final = MAIN_STREAM
 
+# Transcode the shared live session to H.264 instead of copying the camera's native
+# HEVC. Off by default: HA's built-in go2rtc converts HEVC->H.264 for browsers on
+# demand, so the copy path stays CPU-free. Enable only when that path is unavailable
+# (no go2rtc, or HEVC over WebRTC won't play) - it makes FFmpeg re-encode continuously
+# per viewed camera, which is CPU-heavy (roughly a core per 1080p camera).
+CONF_FORCE_H264: Final = "force_h264"
+DEFAULT_FORCE_H264: Final = False
+
 DEFAULT_REGION: Final = "Europe"
 
 # EZVIZ ``deviceCategory`` for battery-powered cameras (matches pyezvizapi's

@@ -31,6 +31,7 @@ from custom_components.ezviz_stream.config_flow import (
 )
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_FORCE_H264,
     CONF_IS_BATTERY,
     CONF_IS_ENCRYPTED,
     CONF_MAX_SNAPSHOTS,
@@ -230,6 +231,7 @@ async def test_add_camera_subentry(hass: HomeAssistant) -> None:
         CONF_THUMBNAIL_MODE: THUMBNAIL_INTERVAL,  # SN1 is an IPC (mains) cam
         CONF_SNAPSHOT_INTERVAL: DEFAULT_SNAPSHOT_INTERVAL,  # mains default
         CONF_STREAM: 1,  # main stream by default
+        CONF_FORCE_H264: False,  # native HEVC copy by default (go2rtc transcodes)
         CONF_IS_BATTERY: False,
         # CONF_IS_ENCRYPTED omitted: encryption status is unknown for this test cam
     }
@@ -335,9 +337,51 @@ async def test_reconfigure_camera_subentry(hass: HomeAssistant) -> None:
         CONF_THUMBNAIL_MODE: THUMBNAIL_MOTION,
         CONF_SNAPSHOT_INTERVAL: 900,
         CONF_STREAM: 2,  # switched to sub stream
+        CONF_FORCE_H264: False,  # not enabled in this reconfigure
         CONF_IS_BATTERY: False,  # resolved from the account (SN1 is IPC)
         # CONF_IS_ENCRYPTED omitted: _CAMERAS leaves encryption status unknown
     }
+
+
+async def test_reconfigure_enables_h264_transcode(hass: HomeAssistant) -> None:
+    """Turning on the H.264 option in the advanced section persists it."""
+    entry = _account_entry(
+        subentries=[
+            ConfigSubentryData(
+                data={
+                    CONF_SERIAL: "SN1",
+                    CONF_VERIFICATION_CODE: "",
+                    CONF_THUMBNAIL_MODE: THUMBNAIL_INTERVAL,
+                    CONF_SNAPSHOT_INTERVAL: 30,
+                    CONF_STREAM: 1,
+                },
+                subentry_type=CAMERA_SUBENTRY_TYPE,
+                title="Front door",
+                unique_id="SN1",
+            )
+        ]
+    )
+    entry.add_to_hass(hass)
+    subentry_id = next(iter(entry.subentries))
+
+    with _patch_api(), _patch_frame_grab(ok=True):
+        result = await entry.start_subentry_reconfigure_flow(hass, subentry_id)
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                CONF_VERIFICATION_CODE: "",
+                "advanced": {
+                    CONF_THUMBNAIL_MODE: THUMBNAIL_INTERVAL,
+                    CONF_SNAPSHOT_INTERVAL: 30,
+                    CONF_STREAM: "1",
+                    CONF_FORCE_H264: True,
+                },
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.ABORT
+    assert entry.subentries[subentry_id].data[CONF_FORCE_H264] is True
 
 
 async def test_encrypted_camera_requires_and_validates_code(

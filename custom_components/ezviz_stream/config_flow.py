@@ -26,6 +26,7 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import section
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -50,6 +51,7 @@ from .api import (
 from .camera import persist_snapshot
 from .const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_FORCE_H264,
     CONF_IS_BATTERY,
     CONF_IS_ENCRYPTED,
     CONF_MAX_SNAPSHOTS,
@@ -62,6 +64,7 @@ from .const import (
     CONF_STREAM,
     CONF_THUMBNAIL_MODE,
     CONF_VERIFICATION_CODE,
+    DEFAULT_FORCE_H264,
     DEFAULT_MAX_SNAPSHOTS,
     DEFAULT_REGION,
     DEFAULT_SNAPSHOT_INTERVAL,
@@ -100,13 +103,14 @@ _VERIFY_TIMEOUT = 30.0
 _VERIFY_MAX_SESSIONS = 3
 
 
-def _camera_options_schema(
+def _camera_options_schema(  # noqa: PLR0913 - one form field per editable setting
     *,
     verification_code: str,
     is_encrypted: bool | None,
     thumbnail_mode: str,
     snapshot_interval: int,
     stream: int,
+    force_h264: bool,
 ) -> vol.Schema:
     """
     Build the schema for a camera's editable settings (add + reconfigure).
@@ -173,6 +177,7 @@ def _camera_options_schema(
                         mode=SelectSelectorMode.DROPDOWN,
                     )
                 ),
+                vol.Required(CONF_FORCE_H264, default=force_h264): BooleanSelector(),
             }
         ),
         {"collapsed": True},
@@ -220,6 +225,7 @@ def _camera_subentry_data(
             user_input.get(CONF_SNAPSHOT_INTERVAL, DEFAULT_SNAPSHOT_INTERVAL)
         ),
         CONF_STREAM: int(user_input[CONF_STREAM]),
+        CONF_FORCE_H264: bool(user_input.get(CONF_FORCE_H264, DEFAULT_FORCE_H264)),
     }
     if is_battery is not None:  # omit when unknown rather than store a null
         data[CONF_IS_BATTERY] = is_battery
@@ -539,6 +545,7 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
                     else DEFAULT_SNAPSHOT_INTERVAL
                 ),
                 stream=SUB_STREAM if battery else DEFAULT_STREAM,
+                force_h264=DEFAULT_FORCE_H264,
             ),
             errors=errors,
             description_placeholders={
@@ -597,6 +604,7 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
                 ),
                 snapshot_interval=_stored_interval(subentry.data),
                 stream=subentry.data.get(CONF_STREAM, DEFAULT_STREAM),
+                force_h264=subentry.data.get(CONF_FORCE_H264, DEFAULT_FORCE_H264),
             ),
             errors=errors,
             description_placeholders={

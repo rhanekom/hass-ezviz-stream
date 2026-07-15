@@ -30,6 +30,7 @@ from custom_components.ezviz_stream.camera import (
 )
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_FORCE_H264,
     CONF_IS_BATTERY,
     CONF_REGION,
     CONF_SERIAL,
@@ -684,6 +685,27 @@ async def test_make_source_builds_mpegts_source(hass: HomeAssistant) -> None:
     assert ms.call_args.args[1] == "SN1"
     assert ms.call_args.kwargs["stream"] == 2
     assert ms.call_args.kwargs["verification_code"] == "CODE"
+    assert ms.call_args.kwargs["transcode"] is False  # native HEVC copy by default
+
+
+async def test_make_source_forwards_h264_transcode(hass: HomeAssistant) -> None:
+    """The force_h264 subentry option makes the source transcode to H.264."""
+    camera = _make_camera(
+        hass, {CONF_SERIAL: "SN1", CONF_FORCE_H264: True}, api=AsyncMock()
+    )
+    with (
+        patch(
+            "custom_components.ezviz_stream.camera.mpegts_source", return_value="SRC"
+        ) as ms,
+        patch(
+            "custom_components.ezviz_stream.camera.get_ffmpeg_manager",
+            return_value=SimpleNamespace(binary="ffmpeg"),
+        ),
+    ):
+        camera._make_source()
+        await hass.async_block_till_done()
+
+    assert ms.call_args.kwargs["transcode"] is True
 
 
 async def test_resolve_battery_swallows_error(hass: HomeAssistant) -> None:

@@ -19,6 +19,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from .broadcast import CameraBroadcast, mpegts_source
 from .const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_FORCE_H264,
     CONF_IS_BATTERY,
     CONF_MOTION_THUMBNAIL,
     CONF_SERIAL,
@@ -28,6 +29,7 @@ from .const import (
     CONF_STREAM,
     CONF_THUMBNAIL_MODE,
     CONF_VERIFICATION_CODE,
+    DEFAULT_FORCE_H264,
     DEFAULT_SNAPSHOT_INTERVAL,
     DEFAULT_SNAPSHOT_INTERVAL_BATTERY,
     DEFAULT_STREAM,
@@ -175,6 +177,9 @@ class EzvizStreamCamera(Camera):
         self._thumbnail_mode: str = _resolve_thumbnail_mode(subentry.data)
         self._snapshot_interval: float = _resolve_interval(subentry.data)
         self._stream_index: int = subentry.data.get(CONF_STREAM, DEFAULT_STREAM)
+        # Re-encode to H.264 on the shared session instead of copying native HEVC.
+        # CPU-heavy; opt-in for when go2rtc's on-demand transcode isn't available.
+        self._force_h264: bool = subentry.data.get(CONF_FORCE_H264, DEFAULT_FORCE_H264)
         # None until known (cameras added before this was recorded resolve it once).
         self._is_battery: bool | None = subentry.data.get(CONF_IS_BATTERY)
         # None until a control-plane lookup reports it. Drives `available` and the
@@ -210,6 +215,7 @@ class EzvizStreamCamera(Camera):
             get_ffmpeg_manager(self.hass).binary,
             stream=self._stream_index,
             verification_code=self._verification_code,
+            transcode=self._force_h264,
         )
 
     @property

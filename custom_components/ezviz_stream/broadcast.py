@@ -39,18 +39,42 @@ _MAX_PACE_SLEEP = 2.0  # safety cap on a single wait, so a bad timestamp can't s
 
 
 async def _spawn_ffmpeg(
-    ffmpeg_bin: str, input_fmt: str, *, wallclock: bool
+    ffmpeg_bin: str, input_fmt: str, *, wallclock: bool, transcode: bool = False
 ) -> asyncio.subprocess.Process:
     """
-    Start ``ffmpeg -f <input_fmt> -i pipe:0 -c copy -f mpegts pipe:1``.
+    Start ``ffmpeg -f <input_fmt> -i pipe:0 <video codec> -f mpegts pipe:1``.
 
     ``wallclock`` stamps input frames with their arrival time - needed for raw HEVC
     (no container timestamps); MPEG-PS already carries PTS so it is left off.
+    ``transcode`` re-encodes the video to H.264 (browser-universal) instead of copying
+    the camera's native HEVC; audio is copied through either way. It is CPU-heavy, so
+    it is opt-in per camera (see ``CONF_FORCE_H264``).
     """
     args = [ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer"]
     if wallclock:
         args += ["-use_wallclock_as_timestamps", "1"]
-    args += ["-f", input_fmt, "-i", "pipe:0", "-c", "copy", "-f", "mpegts", "pipe:1"]
+    args += ["-f", input_fmt, "-i", "pipe:0"]
+    if transcode:
+        # ultrafast/zerolatency keep encode latency and CPU as low as a live H.264
+        # encode allows; -g 30 caps the keyframe gap (~2 s at 15 fps) for quick player
+        # start and clean keyframe snapshots. Audio (if any) is copied untouched.
+        args += [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            "30",
+            "-c:a",
+            "copy",
+        ]
+    else:
+        args += ["-c", "copy"]
+    args += ["-f", "mpegts", "pipe:1"]
     return await asyncio.create_subprocess_exec(
         *args,
         stdin=asyncio.subprocess.PIPE,
@@ -59,23 +83,25 @@ async def _spawn_ffmpeg(
     )
 
 
-async def mpegts_source(
+async def mpegts_source(  # noqa: PLR0913 - one live source needs api, camera + tuning
     api: EzvizCloudApi,
     serial: str,
     ffmpeg_bin: str,
     *,
     stream: int,
     verification_code: str,
+    transcode: bool = False,
 ) -> AsyncIterator[bytes]:
     """
-    Yield MPEG-TS chunks remuxed from the camera's live stream (FFmpeg copy, no encode).
+    Yield MPEG-TS chunks remuxed from the camera's live stream.
 
     Resolves the camera fresh (for current VTM routing), then picks the path by
     transport: battery cams stream raw RTP/HEVC (Annex-B, paced to the RTP clock and
     wall-clock stamped by :func:`_feed_rtp`); other cams stream MPEG-PS, which
     :func:`_feed_ps` decrypts on the fly (Image Encryption) and which already carries
-    PTS. Both remux to MPEG-TS. Runs until the consumer stops iterating; FFmpeg is torn
-    down on exit.
+    PTS. Both remux to MPEG-TS. With ``transcode`` the video is re-encoded to H.264
+    (browser-universal, CPU-heavy) instead of copied as native HEVC. Runs until the
+    consumer stops iterating; FFmpeg is torn down on exit.
     """
     camera = next(
         (cam for cam in await api.async_get_cameras() if cam.serial == serial), None
@@ -86,10 +112,14 @@ async def mpegts_source(
 
     token_factory = api.async_get_vtdu_token
     if camera.is_battery:
-        ffmpeg = await _spawn_ffmpeg(ffmpeg_bin, "hevc", wallclock=True)
+        ffmpeg = await _spawn_ffmpeg(
+            ffmpeg_bin, "hevc", wallclock=True, transcode=transcode
+        )
         feeder = asyncio.create_task(_feed_rtp(camera, token_factory, ffmpeg, stream))
     else:
-        ffmpeg = await _spawn_ffmpeg(ffmpeg_bin, "mpeg", wallclock=False)
+        ffmpeg = await _spawn_ffmpeg(
+            ffmpeg_bin, "mpeg", wallclock=False, transcode=transcode
+        )
         feeder = asyncio.create_task(
             _feed_ps(camera, token_factory, ffmpeg, stream, verification_code)
         )
