@@ -49,6 +49,13 @@ _HANDSHAKE_TIMEOUT = 10
 _KEEPALIVE_INTERVAL = 5.0
 _READ_SLICE = 5.0
 _RETRY_BACKOFF = 2.0  # brief pause between sessions (wakes a sleeping cam; eases CAS)
+# Give up a live stream after this many consecutive attempts that yield no media - a
+# handshake failure (e.g. 5404 device-offline) or a session that produced nothing.
+# Prevents an unbounded reconnect loop hammering an offline/asleep camera forever (a
+# productive session resets the count, so the normal ~27 s VTDU drop never trips it).
+# ~10 attempts x ~3 s ≈ 30 s: long enough to let a sleeping battery cam wake (which
+# can report 5404 while waking), short enough not to spin for minutes when truly gone.
+_MAX_STREAM_FAILURES = 10
 _RECV = 65536
 _FFMPEG_FMT = {"rtp": "hevc", "mpeg-ps": "mpeg", "mpeg-ts": "mpegts"}
 _MIN_JPEG_BYTES = 5000  # smaller than a real frame => a decode artifact
@@ -236,7 +243,12 @@ async def _decode_jpeg(
     args = [ffmpeg_bin, "-hide_banner", "-v", "error", "-y"]
     if fmt:
         args += ["-f", fmt]
-    args += ["-i", "pipe:0", "-frames:v", "1", "-f", "image2", "pipe:1"]
+    # Decode keyframes only: a mid-GOP window would otherwise yield a P-frame decoded
+    # without its reference, or a half-decoded frame from an incomplete keyframe -
+    # either way a corrupt/partial image. -frames:v 1 then emits the first complete
+    # keyframe, or nothing (better than a half image).
+    args += ["-skip_frame", "nokey", "-i", "pipe:0", "-frames:v", "1"]
+    args += ["-f", "image2", "pipe:1"]
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdin=asyncio.subprocess.PIPE,
@@ -244,6 +256,73 @@ async def _decode_jpeg(
         stderr=asyncio.subprocess.DEVNULL,
     )
     jpeg, _ = await proc.communicate(media)
+    return jpeg if len(jpeg) >= _MIN_JPEG_BYTES else None
+
+
+async def capture_jpeg_from_ts(
+    ffmpeg_bin: str,
+    source: AsyncIterator[bytes],
+    *,
+    timeout: float,  # noqa: ASYNC109 - a caller-supplied capture budget, used via wait_for
+) -> bytes | None:
+    """
+    Decode one complete keyframe JPEG from a *live* MPEG-TS stream.
+
+    Unlike :func:`_decode_jpeg` (which decodes a fixed buffer and can emit a partial
+    frame if the buffer was cut mid-keyframe), this pipes ``source`` into FFmpeg and
+    reads the single frame it emits only once it has fully decoded a keyframe
+    (``-skip_frame nokey -frames:v 1``). FFmpeg controls completeness, so a mid-GOP tap
+    can never yield a half image; it returns None if no keyframe arrives within
+    ``timeout`` or the source is empty (nothing was streaming).
+    """
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg_bin,
+        "-hide_banner",
+        "-v",
+        "error",
+        "-skip_frame",
+        "nokey",
+        "-f",
+        "mpegts",
+        "-i",
+        "pipe:0",
+        "-frames:v",
+        "1",
+        "-f",
+        "image2",
+        "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    assert proc.stdin is not None  # noqa: S101 - PIPE guarantees a writer
+    assert proc.stdout is not None  # noqa: S101 - PIPE guarantees a reader
+
+    async def _feed() -> None:
+        try:
+            async for chunk in source:
+                proc.stdin.write(chunk)
+                await proc.stdin.drain()
+        except BrokenPipeError, ConnectionResetError, OSError:
+            pass  # FFmpeg emitted its frame and exited; stop feeding
+        finally:
+            with contextlib.suppress(OSError):
+                proc.stdin.close()
+
+    feeder = asyncio.create_task(_feed())
+    try:
+        jpeg = await asyncio.wait_for(proc.stdout.read(), timeout)
+    except TimeoutError:
+        jpeg = b""
+    finally:
+        feeder.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await feeder
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
     return jpeg if len(jpeg) >= _MIN_JPEG_BYTES else None
 
 
@@ -312,12 +391,27 @@ async def iter_annexb(
     and is handled separately (C.2b). ``token_factory`` yields a fresh VTDU token per
     reconnect.
     """
+    failures = 0
     while True:
+        if failures >= _MAX_STREAM_FAILURES:
+            _LOGGER.warning(
+                "camera %s: giving up the stream after %s attempts with no media "
+                "(device offline/unreachable)",
+                camera.serial,
+                failures,
+            )
+            return
         try:
             token = await token_factory()
             reader, writer, stream_ssn = await open_stream(camera, token, stream=stream)
         except StreamError as err:
-            _LOGGER.debug("stream handshake failed: %s", err)
+            failures += 1
+            _LOGGER.debug(
+                "stream handshake failed (%s/%s): %s",
+                failures,
+                _MAX_STREAM_FAILURES,
+                err,
+            )
             await asyncio.sleep(_RETRY_BACKOFF)
             continue
 
@@ -325,6 +419,7 @@ async def iter_annexb(
         frames = _FrameReader(reader)
         depacketizer = HevcDepacketizer()
         last_ka = loop.time()
+        produced = False
         try:
             while True:
                 if stream_ssn and loop.time() - last_ka >= _KEEPALIVE_INTERVAL:
@@ -342,6 +437,7 @@ async def iter_annexb(
                 if detect_transport(body) == "rtp":
                     chunk = depacketizer.push(body)
                     if chunk:
+                        produced = True
                         # RTP 90 kHz timestamp of the packet completing this access
                         # unit (bytes 4-8 of the RTP header).
                         yield int.from_bytes(body[4:8], "big"), chunk
@@ -349,6 +445,7 @@ async def iter_annexb(
             writer.close()
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
+        failures = 0 if produced else failures + 1  # a productive session resets it
         await asyncio.sleep(_RETRY_BACKOFF)
 
 
@@ -369,18 +466,34 @@ async def iter_ps_decrypted(
     container carries its own PTS, so the consumer feeds ffmpeg ``-f mpeg`` with no
     pacing needed.
     """
+    failures = 0
     while True:
+        if failures >= _MAX_STREAM_FAILURES:
+            _LOGGER.warning(
+                "camera %s: giving up the stream after %s attempts with no media "
+                "(device offline/unreachable)",
+                camera.serial,
+                failures,
+            )
+            return
         try:
             token = await token_factory()
             reader, writer, stream_ssn = await open_stream(camera, token, stream=stream)
         except StreamError as err:
-            _LOGGER.debug("PS stream handshake failed: %s", err)
+            failures += 1
+            _LOGGER.debug(
+                "PS stream handshake failed (%s/%s): %s",
+                failures,
+                _MAX_STREAM_FAILURES,
+                err,
+            )
             await asyncio.sleep(_RETRY_BACKOFF)
             continue
 
         loop = asyncio.get_running_loop()
         frames = _FrameReader(reader)
         last_ka = loop.time()
+        produced = False
         decryptor = (
             StreamingPsDecryptor(verification_code) if verification_code else None
         )
@@ -405,11 +518,13 @@ async def iter_ps_decrypted(
                 else:
                     chunk = body
                 if chunk:
+                    produced = True
                     yield chunk
         finally:
             writer.close()
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
+        failures = 0 if produced else failures + 1  # a productive session resets it
         await asyncio.sleep(_RETRY_BACKOFF)
 
 

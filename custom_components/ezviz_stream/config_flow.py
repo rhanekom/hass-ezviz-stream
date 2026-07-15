@@ -141,7 +141,7 @@ def _camera_options_schema(
                             ),
                             SelectOptionDict(
                                 value=THUMBNAIL_STATIC,
-                                label="Static image (captured once)",
+                                label="Static image (refreshed when viewed)",
                             ),
                             SelectOptionDict(
                                 value=THUMBNAIL_STATIC_MOTION,
@@ -521,9 +521,9 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
                 self._pending_data, self._pending_subentry = data, None
                 return await self.async_step_verify_failed()
 
-        # Battery cams default to a static baseline that only shows newer motion
-        # (a clean tile, no repeated wakes), a long refresh interval, and the
-        # lower-bandwidth sub stream; all overridable.
+        # Battery cams default to a static baseline that only shows newer motion,
+        # refreshed from the no-wake alarm API (never woken just for a tile), a long
+        # refresh interval, and the lower-bandwidth sub stream; all overridable.
         battery = camera.is_battery
         return self.async_show_form(
             step_id="options",

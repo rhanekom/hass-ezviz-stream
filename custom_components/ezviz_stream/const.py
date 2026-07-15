@@ -48,7 +48,9 @@ MAX_SNAPSHOT_INTERVAL: Final = 21600  # 6 h - for battery cams woken very rarely
 #   interval      - a live snapshot refreshed every CONF_SNAPSHOT_INTERVAL (wakes
 #                   battery cams);
 #   motion        - the latest cloud motion image, no wake (reference A.8.1);
-#   static        - grabbed once then frozen;
+#   static        - refreshed from the live view whenever a stream opens (tapping the
+#                   already-running broadcast, no extra cloud session), else the last
+#                   captured frame;
 #   static_motion - a static baseline, replaced by a motion image only when the event
 #                   is newer than CONF_STATIC_ANCHOR (re-set on each save).
 CONF_THUMBNAIL_MODE: Final = "thumbnail_mode"

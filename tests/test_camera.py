@@ -8,8 +8,10 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
 from homeassistant.config_entries import ConfigSubentry, ConfigSubentryData
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -46,6 +48,8 @@ from custom_components.ezviz_stream.const import (
 from custom_components.ezviz_stream.stream_view import DATA_STREAMS
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from homeassistant.core import HomeAssistant
 
 _ACCOUNT = {
@@ -429,47 +433,79 @@ async def test_motion_thumbnail_seeds_with_live_grab(hass: HomeAssistant) -> Non
     grab.assert_awaited_once()  # seeded via one live grab when no motion image
 
 
-async def test_static_thumbnail_grabbed_once_then_frozen(
+async def test_static_serves_cached_frame_without_grabbing(
     hass: HomeAssistant,
 ) -> None:
-    """Static mode grabs one live frame, then never refreshes (infinite TTL)."""
-    api = AsyncMock()
-    api.async_get_cameras = AsyncMock(
-        return_value=[EzvizCamera("SN1", "Cam", "IPC", 1, 1, streamable=True)]
+    """Static mode never grabs on the request path - it serves the cached frame."""
+    camera = _make_camera(
+        hass, {CONF_SERIAL: "SN1", CONF_THUMBNAIL_MODE: THUMBNAIL_STATIC}
     )
-    entry = SimpleNamespace(
-        runtime_data=SimpleNamespace(api=api, snapshot_semaphore=asyncio.Semaphore(1))
+    camera._image = b"CACHED" * 100
+    camera._image_at = 0.0  # would look stale, but static ignores the request path
+    with patch("custom_components.ezviz_stream.camera.grab_jpeg", AsyncMock()) as grab:
+        image = await camera.async_camera_image()
+    assert image == b"CACHED" * 100
+    grab.assert_not_called()
+
+
+async def test_static_refreshes_from_live_view(hass: HomeAssistant) -> None:
+    """Opening a stream refreshes the static thumbnail from the live view (no grab)."""
+    camera = _make_camera(
+        hass, {CONF_SERIAL: "SN1", CONF_THUMBNAIL_MODE: THUMBNAIL_STATIC}
     )
-    subentry = SimpleNamespace(
-        data={
-            CONF_SERIAL: "SN1",
-            CONF_VERIFICATION_CODE: "",
-            CONF_THUMBNAIL_MODE: THUMBNAIL_STATIC,
-        },
-        title="Cam",
-        subentry_id="x",
-    )
-    camera = EzvizStreamCamera(entry, subentry)
-    camera.hass = hass
-    assert camera._cache_ttl == float("inf")  # never goes stale
+    hass.http = SimpleNamespace(server_port=8123)
+
+    async def _empty() -> AsyncIterator[bytes]:
+        yield b""  # a live-view tap (contents irrelevant; the decoder is mocked)
+
+    subscribe = Mock(return_value=_empty())
+    camera._broadcast = SimpleNamespace(subscribe=subscribe, is_running=True)
 
     with (
         patch(
-            "custom_components.ezviz_stream.camera.grab_jpeg",
-            AsyncMock(return_value=b"STATIC" * 100),
-        ) as grab,
+            "custom_components.ezviz_stream.camera.capture_jpeg_from_ts",
+            AsyncMock(return_value=b"LIVE" * 100),
+        ) as capture,
         patch(
             "custom_components.ezviz_stream.camera.get_ffmpeg_manager",
             return_value=SimpleNamespace(binary="ffmpeg"),
         ),
+        patch("custom_components.ezviz_stream.camera._STREAM_CAPTURE_DELAY", 0.0),
     ):
-        first = await camera.async_camera_image()
-        await hass.async_block_till_done()
-        second = await camera.async_camera_image()
+        await camera.stream_source()
+        assert camera._capture_task is not None
+        await camera._capture_task
 
-    assert first == b"STATIC" * 100
-    assert second == first
-    grab.assert_awaited_once()  # captured once, never refreshed
+    subscribe.assert_called_once_with(start_if_idle=False)  # tap a live session only
+    capture.assert_awaited_once()
+    assert camera._image == b"LIVE" * 100
+
+
+async def test_static_capture_skipped_when_broadcast_idle(hass: HomeAssistant) -> None:
+    """A stream_source() registration call must not spawn a decoder for an idle cam."""
+    camera = _make_camera(
+        hass, {CONF_SERIAL: "SN1", CONF_THUMBNAIL_MODE: THUMBNAIL_STATIC}
+    )
+    hass.http = SimpleNamespace(server_port=8123)
+    # HA also calls stream_source() to register the source at startup, with nobody
+    # watching: the broadcast is idle, so the capture must bail before any ffmpeg.
+    subscribe = Mock()
+    camera._broadcast = SimpleNamespace(subscribe=subscribe, is_running=False)
+
+    with (
+        patch(
+            "custom_components.ezviz_stream.camera.capture_jpeg_from_ts",
+            AsyncMock(),
+        ) as capture,
+        patch("custom_components.ezviz_stream.camera._STREAM_CAPTURE_DELAY", 0.0),
+    ):
+        await camera.stream_source()
+        assert camera._capture_task is not None
+        await camera._capture_task
+
+    subscribe.assert_not_called()
+    capture.assert_not_awaited()
+    assert camera._image is None
 
 
 def _static_motion_camera(
@@ -832,3 +868,79 @@ async def test_account_removal_deletes_all_snapshots(hass: HomeAssistant) -> Non
 
     assert not sn1.exists()
     assert not sn2.exists()
+
+
+# --- availability + offline fast-fail ---------------------------------------- #
+def _cam(status: int, *, category: str = "IPC") -> EzvizCamera:
+    """Build an EzvizCamera with a given online status/category for lookups."""
+    return EzvizCamera("SN1", "Cam", category, 1, status, streamable=True)
+
+
+@pytest.mark.parametrize(
+    ("is_battery", "is_online", "expected"),
+    [
+        (False, False, False),  # a mains camera that is genuinely offline
+        (False, True, True),  # a mains camera that is online
+        (False, None, True),  # online state not yet known - stay available
+        (True, False, True),  # a battery camera "offline" is just asleep
+    ],
+)
+def test_available_reflects_online_state(
+    hass: HomeAssistant,
+    is_battery: bool,
+    is_online: bool | None,
+    expected: bool,
+) -> None:
+    """Only a known-offline mains camera is unavailable; battery cams stay available."""
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1"})
+    camera._is_battery = is_battery
+    camera._is_online = is_online
+    assert camera.available is expected
+
+
+async def test_stream_source_refuses_offline_mains_camera(hass: HomeAssistant) -> None:
+    """An offline mains camera fast-fails so HA never starts a retrying worker."""
+    api = AsyncMock(async_get_cameras=AsyncMock(return_value=[_cam(2)]))  # status 2
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1", CONF_IS_BATTERY: False}, api=api)
+    hass.http = SimpleNamespace(server_port=8123)
+
+    with pytest.raises(HomeAssistantError):
+        await camera.stream_source()
+    assert camera._is_online is False  # the lookup recorded the offline state
+
+
+async def test_stream_source_serves_online_mains_camera(hass: HomeAssistant) -> None:
+    """An online mains camera returns its media URL as normal."""
+    api = AsyncMock(async_get_cameras=AsyncMock(return_value=[_cam(1)]))  # status 1
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1", CONF_IS_BATTERY: False}, api=api)
+    hass.http = SimpleNamespace(server_port=8123)
+
+    url = await camera.stream_source()
+    assert "/api/ezviz_stream/SN1?token=" in url
+    assert camera._is_online is True
+
+
+async def test_stream_source_never_refuses_battery_camera(hass: HomeAssistant) -> None:
+    """A battery camera is streamed even when 'offline' - streaming wakes it."""
+    api = AsyncMock(async_get_cameras=AsyncMock())
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1", CONF_IS_BATTERY: True}, api=api)
+    hass.http = SimpleNamespace(server_port=8123)
+
+    url = await camera.stream_source()
+    assert "/api/ezviz_stream/SN1?token=" in url
+    api.async_get_cameras.assert_not_called()  # no lookup: never gate a battery wake
+
+
+async def test_removal_stops_orphaned_ha_stream(hass: HomeAssistant) -> None:
+    """Removing a camera tears down its HA Stream so it stops retrying the dead URL."""
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1"})
+    camera._broadcast = AsyncMock()
+    stream = SimpleNamespace(stop=AsyncMock())
+    camera.stream = stream
+
+    with patch("custom_components.ezviz_stream.camera.unregister_stream") as unreg:
+        await camera.async_will_remove_from_hass()
+
+    unreg.assert_called_once()
+    stream.stop.assert_awaited_once()
+    assert camera.stream is None

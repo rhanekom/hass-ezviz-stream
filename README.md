@@ -84,10 +84,11 @@ On the account, use **Add camera**:
               cameras).
             - *Latest motion image* - the most recent cloud motion snapshot, with no
               camera wake.
-            - *Static image* - captured once, then frozen.
+            - *Static image* - the last frame from a live view, refreshed for free
+              whenever you open the stream (never wakes the camera on its own).
             - *Static, then newer motion images* - a static baseline that is replaced
-              only by motion newer than the last save (**the battery default**; save the
-              camera again to dismiss an unwanted image).
+              only by motion newer than the last save (**the battery default**; save
+              the camera again to dismiss an unwanted image).
         - **Thumbnail refresh interval** - how often a tile that's being viewed
           refreshes (longer wakes battery cameras less often).
         - **Video stream** - **Main (HD)** or **Sub (lower resolution)**. Battery

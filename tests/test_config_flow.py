@@ -238,7 +238,7 @@ async def test_add_camera_subentry(hass: HomeAssistant) -> None:
 async def test_add_battery_camera_defaults_to_static_motion(
     hass: HomeAssistant,
 ) -> None:
-    """A battery camera defaults to static-then-motion + long refresh interval."""
+    """A battery camera defaults to static-then-motion (no-wake alarm-image refresh)."""
     entry = _account_entry()
     entry.add_to_hass(hass)
 

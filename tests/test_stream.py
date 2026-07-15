@@ -498,3 +498,25 @@ async def test_stream_annexb_writes_iter_annexb_chunks() -> None:
 
     assert b"".join(written) == b"aabb"
     assert out.flush.call_count == 2  # flushed after each chunk (live, low-latency)
+
+
+# --------------------------------------------------------------------------- #
+# reconnect bound (offline camera fails fast instead of looping forever)
+# --------------------------------------------------------------------------- #
+async def test_iter_annexb_gives_up_after_repeated_handshake_failures() -> None:
+    """A persistently offline camera (5404) stops reconnecting after the bound."""
+    with (
+        patch.object(
+            stream, "open_stream", AsyncMock(side_effect=stream.StreamError("offline"))
+        ) as open_stream,
+        patch.object(stream, "_RETRY_BACKOFF", 0),
+    ):
+        chunks = [
+            chunk
+            async for chunk in stream.iter_annexb(
+                _camera(), AsyncMock(return_value="tok"), stream=1
+            )
+        ]
+
+    assert chunks == []  # nothing streamed, and the generator terminated (no hang)
+    assert open_stream.await_count == stream._MAX_STREAM_FAILURES

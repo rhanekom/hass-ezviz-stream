@@ -345,6 +345,23 @@ async def test_subscribe_returns_when_upstream_ends() -> None:
     assert caster._task is None  # cleaned up after the last subscriber left
 
 
+async def test_subscribe_start_if_idle_false_taps_only_when_running() -> None:
+    """start_if_idle=False yields nothing (and never starts the upstream) when idle."""
+    started = False
+
+    async def source() -> AsyncIterator[bytes]:
+        nonlocal started
+        started = True
+        yield b"x"
+
+    caster = CameraBroadcast(source)
+    chunks = [chunk async for chunk in caster.subscribe(start_if_idle=False)]
+
+    assert chunks == []  # nothing was streaming, so nothing to tap
+    assert started is False  # the upstream session was never started
+    assert caster._task is None
+
+
 async def test_async_stop_cancels_task_and_releases_subscribers() -> None:
     """async_stop tears down the upstream and pushes the end sentinel to subscribers."""
 

@@ -215,14 +215,24 @@ class CameraBroadcast:
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
-    async def subscribe(self) -> AsyncIterator[bytes]:
+    @property
+    def is_running(self) -> bool:
+        """True while an upstream session is live (something is being served)."""
+        return self._task is not None and not self._task.done()
+
+    async def subscribe(self, *, start_if_idle: bool = True) -> AsyncIterator[bytes]:
         """
         Yield MPEG-TS chunks for one consumer, sharing the single upstream session.
 
-        The first subscriber starts the upstream; the last to leave stops it.
+        The first subscriber starts the upstream; the last to leave stops it. With
+        ``start_if_idle=False`` a caller only *taps* an already-running session and
+        yields nothing when idle - used to grab a thumbnail from a live view without
+        opening a cloud session of its own.
         """
         queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=_QUEUE_MAX)
         async with self._lock:
+            if not self.is_running and not start_if_idle:
+                return  # nothing is streaming; do not start a session just to tap it
             self._subscribers.add(queue)
             if self._task is None or self._task.done():
                 self._task = asyncio.create_task(self._run())
