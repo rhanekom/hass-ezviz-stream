@@ -93,6 +93,12 @@ On the account, use **Add camera**:
           refreshes (longer wakes battery cameras less often).
         - **Video stream** - **Main (HD)** or **Sub (lower resolution)**. Battery
           cameras default to **Sub** (gentler on the battery and on a weak connection).
+        - **Transcode to H.264** - off by default. Home Assistant's go2rtc already
+          converts the camera's native HEVC to H.264 for browsers on demand, so leave
+          this off unless live view won't play in your browser. Turning it on
+          re-encodes the video continuously while the camera is watched, which is
+          CPU-heavy (roughly a full core per 1080p camera) - enable it only on the
+          cameras you need it for.
 
 When you save, the integration **grabs a real frame** to confirm the code and stream
 work. If it can't - a wrong code, or a battery camera that's asleep or briefly
