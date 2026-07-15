@@ -48,7 +48,9 @@ MAX_SNAPSHOT_INTERVAL: Final = 21600  # 6 h - for battery cams woken very rarely
 #   interval      - a live snapshot refreshed every CONF_SNAPSHOT_INTERVAL (wakes
 #                   battery cams);
 #   motion        - the latest cloud motion image, no wake (reference A.8.1);
-#   static        - grabbed once then frozen;
+#   static        - refreshed from the live view whenever a stream opens (tapping the
+#                   already-running broadcast, no extra cloud session), else the last
+#                   captured frame;
 #   static_motion - a static baseline, replaced by a motion image only when the event
 #                   is newer than CONF_STATIC_ANCHOR (re-set on each save).
 CONF_THUMBNAIL_MODE: Final = "thumbnail_mode"
@@ -70,6 +72,14 @@ CONF_STREAM: Final = "stream"
 MAIN_STREAM: Final = 1
 SUB_STREAM: Final = 2
 DEFAULT_STREAM: Final = MAIN_STREAM
+
+# Transcode the shared live session to H.264 instead of copying the camera's native
+# HEVC. Off by default: HA's built-in go2rtc converts HEVC->H.264 for browsers on
+# demand, so the copy path stays CPU-free. Enable only when that path is unavailable
+# (no go2rtc, or HEVC over WebRTC won't play) - it makes FFmpeg re-encode continuously
+# per viewed camera, which is CPU-heavy (roughly a core per 1080p camera).
+CONF_FORCE_H264: Final = "force_h264"
+DEFAULT_FORCE_H264: Final = False
 
 DEFAULT_REGION: Final = "Europe"
 

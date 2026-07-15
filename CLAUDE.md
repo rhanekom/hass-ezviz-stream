@@ -164,12 +164,35 @@ Two GitHub Actions workflows on push/PR to main:
 - **lint.yml** — `ruff check` and `ruff format --check`
 - **validate.yml** — Home Assistant `hassfest` manifest validation and HACS validation
 
+## Branching and releases
+
+Since v0.1.0 the repo uses a two-branch model:
+
+- **`main` is protected** — no direct pushes (enforced for admins too); every change
+  lands via a **pull request**. Self-merge is allowed (0 required approvals), so a
+  solo maintainer opens a PR and merges it once CI is green.
+- **`develop`** is the day-to-day integration branch. Do work on `develop` (or feature
+  branches off it) and open the PR into `main`.
+
+**Release process** (as run for v0.1.0):
+
+1. Land everything for the release on `main` via PR, bumping the `version` in
+   `custom_components/ezviz_stream/manifest.json` in that PR.
+2. From `main` (green CI, clean tree), tag it:
+   `git tag -a vX.Y.Z -m "EZVIZ Stream vX.Y.Z" && git push origin vX.Y.Z`.
+3. Publish: `gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <notes> --latest`.
+4. HACS installs the **latest GitHub release**, so real releases are `--latest` (use
+   `--prerelease` only for betas). Do **not** bump `homeassistant` in `hacs.json` /
+   Dependabot for a routine release — it is the support floor, not the target.
+
 ## Working Conventions
 
 - **Never auto-commit or push** — always ask first, **every time**. A prior
   approval to commit/push does **not** carry forward to later commits; re-ask for
   each one, even mid-session.
-- **Don't branch automatically** — the user handles branching.
+- **Don't branch automatically** — the user handles branching. Day-to-day work lands
+  on `develop`; `main` is protected and reached only via PR (see Branching and
+  releases).
 - **No self-attribution** — do not add "Authored by / Generated with Claude Code"
   or `Co-Authored-By` lines to commits, PRs, or any artifact.
 - **When you do commit, commit all changed and new files** (`git add -A`). Never

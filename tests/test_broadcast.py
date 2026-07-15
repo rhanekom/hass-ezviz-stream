@@ -208,6 +208,44 @@ async def test_spawn_ffmpeg_builds_args(*, wallclock: bool) -> None:
     )
 
 
+async def test_spawn_ffmpeg_transcodes_video_to_h264() -> None:
+    """With transcode on, video is re-encoded to H.264 (audio still copied)."""
+    proc = MagicMock()
+    with patch.object(
+        broadcast.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ) as spawn:
+        await broadcast._spawn_ffmpeg("ffmpeg", "hevc", wallclock=True, transcode=True)
+
+    args = spawn.await_args.args
+    assert "libx264" in args
+    assert "-c" not in args  # not a plain stream copy (-c:v / -c:a are distinct)
+    assert args[-5:] == ("-c:a", "copy", "-f", "mpegts", "pipe:1")
+
+
+async def test_mpegts_source_forwards_transcode_flag() -> None:
+    """The transcode flag reaches _spawn_ffmpeg for the chosen transport path."""
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(
+        return_value=[EzvizCamera("SN1", "Cam", "BatteryCamera", 1, 1, streamable=True)]
+    )
+    ffmpeg = MagicMock()
+    ffmpeg.stdout.read = AsyncMock(return_value=b"")
+    ffmpeg.returncode = 0
+
+    with (
+        patch.object(
+            broadcast, "_spawn_ffmpeg", AsyncMock(return_value=ffmpeg)
+        ) as spawn,
+        patch.object(broadcast, "_feed_rtp", AsyncMock()),
+    ):
+        async for _ in broadcast.mpegts_source(
+            api, "SN1", "ffmpeg", stream=1, verification_code="", transcode=True
+        ):
+            pass
+
+    assert spawn.await_args.kwargs["transcode"] is True
+
+
 async def test_mpegts_source_yields_ffmpeg_output() -> None:
     """FFmpeg's stdout is streamed out until EOF, then the feeder + process stop."""
     api = AsyncMock()
@@ -343,6 +381,23 @@ async def test_subscribe_returns_when_upstream_ends() -> None:
 
     assert chunks == [b"a"]
     assert caster._task is None  # cleaned up after the last subscriber left
+
+
+async def test_subscribe_start_if_idle_false_taps_only_when_running() -> None:
+    """start_if_idle=False yields nothing (and never starts the upstream) when idle."""
+    started = False
+
+    async def source() -> AsyncIterator[bytes]:
+        nonlocal started
+        started = True
+        yield b"x"
+
+    caster = CameraBroadcast(source)
+    chunks = [chunk async for chunk in caster.subscribe(start_if_idle=False)]
+
+    assert chunks == []  # nothing was streaming, so nothing to tap
+    assert started is False  # the upstream session was never started
+    assert caster._task is None
 
 
 async def test_async_stop_cancels_task_and_releases_subscribers() -> None:

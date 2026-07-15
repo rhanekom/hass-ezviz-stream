@@ -326,12 +326,37 @@ Other opcodes seen but not needed for basic live view include start/stop stream
 (`0x12E`–`0x131`), playback (`0x137`–`0x13A`), and an ECDH-notify used by the
 encrypted handshake (`0x14A`).
 
-> **Verified (2026-07-13).** `0x132` on channel `0x00` with the `streamssn` body
-> (StreamInfoRsp field 4) is the working keep-alive form, and it is **required**,
-> not optional: on an RTP camera, without a periodic keep-alive the media stalls
-> after the initial parameter sets (only ~18 packets arrive); sending it every ~5 s
-> keeps hundreds of packets/second flowing. This *corrects* the earlier "keep-alive
-> is unreliable, prefer reconnect" guidance (B.11) - you need **both**.
+> **Verified (2026-07-13, body format corrected 2026-07-15).** `0x132` on channel
+> `0x00` carrying the `streamssn` (StreamInfoRsp field 4) is the working keep-alive
+> opcode, and it is **required**, not optional: on an RTP camera, without a periodic
+> keep-alive the media stalls after the initial parameter sets (only ~18 packets
+> arrive); with it, hundreds of packets/second flow. This *corrects* the earlier
+> "keep-alive is unreliable, prefer reconnect" guidance (B.11) - you need **both**.
+> **The body must be the `streamssn` wrapped as protobuf field 1, NOT the raw string**
+> (see the 2026-07-15 capture below); the raw form is fatal.
+>
+> **Keep-alive body format (verified 2026-07-15, packet capture).** The keep-alive
+> body must be the `streamssn` **wrapped as protobuf field 1** (`0a <len> <ssn>`),
+> exactly as the official client sends it. Sending the raw string is fatal: the VTDU
+> replies with a **FIN ~0.2 s later** and closes the session. This was the cause of
+> severe live-view buffering and the day/night ("grayscale-to-colour") flip - the
+> session churned every **~5.5 s** (media flowed ~5 s, we sent one raw-string
+> keep-alive, the server closed ~0.5 s after it). Byte diff of the two keep-alive
+> frames - identical 8-byte header (magic `24`, channel `00`, opcode `0132`), only
+> the body differs:
+>
+> | Sender | Body | Frame bytes |
+> |--------|------|-------------|
+> | Official client (session lived 141 s) | `0a 33` + `<51-byte ssn>` | 61 |
+> | Our old (raw) form (FIN after ~5.5 s) | `<51-byte ssn>` | 59 |
+>
+> `0a` = protobuf tag (field 1, wire type 2), `33` = length 51. The official client
+> sends it **every ~10 s** and **increments the frame sequence** each time (`seq` =
+> 1, 2, 3, …). Evidence: `scripts/in/EzViz_Capture_Full.pcapng` (official app: one
+> **141 s** session on `104.166.134.53:6002`, keep-alive every 10 s, accepted) vs
+> `EzViz_Capture_HA.pcapng` (our old client: sessions dying at ~5.5 s, keep-alive
+> never acked, immediate FIN). Both use the identical cloud `ysproto` VTDU path - the
+> only difference was this 2-byte protobuf wrapper.
 >
 > **No I-frame / force-IDR opcode is known.** A sweep of `0x130`–`0x145` (excl. the
 > five known opcodes), each sent on channel `0x00` with the `streamssn` body ~1.5 s
@@ -370,7 +395,7 @@ encrypted handshake (`0x14A`).
    │  TCP connect ─────────────────────────────────────────────────▶│
    │  StreamInfoReq (0x13B, + vtmstreamkey) ───────────────────────▶│
    │◀──── StreamInfoRsp (0x13C) ─────────────────────────────────────│
-   │  KeepAlive (0x132, body = streamssn) ─────────────────────────▶│
+   │  KeepAlive (0x132, body = streamssn as pb field 1, seq++) ────▶│
    │◀═════ channel 0x01 media packets ═══════════════════════════════│
 ```
 
@@ -403,7 +428,7 @@ only touch a handful of fields.
 | Field # | Type | Meaning |
 |---------|------|---------|
 | 1 | int32 | `result` - `0` = OK, else an error (B.9) |
-| 4 | string | `streamssn` - stream session id (echoed in keep-alive) |
+| 4 | string | `streamssn` - stream session id (sent in each keep-alive, wrapped as protobuf field 1) |
 | 5 | string | `vtmstreamkey` - key to present to the VTDU |
 | 7 | string | `streamurl` - **the VTDU redirect URL** |
 | 9 | string | `aesmd5` - MD5 bound to the AES stream key (encrypted path) |
@@ -638,10 +663,15 @@ decryptor is a **new, small helper**, not reusable from `decrypt.py`.
   layer, use discontinuity-tolerant segmenting so the viewer doesn't see a hard
   stop. Note: reconnected sessions are independent live streams and **cannot be
   byte-spliced** into one file (each may start mid-frame/mid-PES).
-- **Keep-alive is required, not optional.** *(Corrected 2026-07-13.)* Earlier
-  guidance said keep-alive was unreliable; in fact `0x132`/`streamssn` every ~5 s
-  is what keeps media flowing - without it an RTP stream stalls after the parameter
-  sets. Use keep-alive **and** the reconnect loop; they solve different problems.
+- **Keep-alive is required, not optional - and its body must be protobuf-wrapped.**
+  *(Corrected 2026-07-13; body format corrected 2026-07-15.)* Earlier guidance said
+  keep-alive was unreliable; in fact `0x132` carrying the `streamssn` is what keeps
+  media flowing - without it an RTP stream stalls after the parameter sets. But the
+  body must be the `streamssn` **wrapped as protobuf field 1** (`0a <len> <ssn>`), as
+  the official client sends it every ~10 s (seq incrementing); sending the **raw**
+  string makes the VTDU FIN the connection ~0.2 s later, which churns the session
+  every ~5.5 s and is what caused heavy live-view buffering and the day/night flip
+  (see B.3). Use keep-alive **and** the reconnect loop; they solve different problems.
 - **IPC cameras: the blocker was video encryption, not GOP length - now solved.**
   *(Resolved 2026-07-13.)* Earlier we read the IPC failure as a long keyframe
   interval on the **main** stream (a ~170 s sweep saw a single IDR). The fix has two

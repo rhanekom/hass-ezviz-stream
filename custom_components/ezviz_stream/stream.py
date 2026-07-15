@@ -46,9 +46,16 @@ _LOGGER = logging.getLogger(__name__)
 
 _CONNECT_TIMEOUT = 10
 _HANDSHAKE_TIMEOUT = 10
-_KEEPALIVE_INTERVAL = 5.0
+_KEEPALIVE_INTERVAL = 10.0  # matches the official client (packet capture); it FINs
 _READ_SLICE = 5.0
 _RETRY_BACKOFF = 2.0  # brief pause between sessions (wakes a sleeping cam; eases CAS)
+# Give up a live stream after this many consecutive attempts that yield no media - a
+# handshake failure (e.g. 5404 device-offline) or a session that produced nothing.
+# Prevents an unbounded reconnect loop hammering an offline/asleep camera forever (a
+# productive session resets the count, so the normal ~27 s VTDU drop never trips it).
+# ~10 attempts x ~3 s ≈ 30 s: long enough to let a sleeping battery cam wake (which
+# can report 5404 while waking), short enough not to spin for minutes when truly gone.
+_MAX_STREAM_FAILURES = 10
 _RECV = 65536
 _FFMPEG_FMT = {"rtp": "hevc", "mpeg-ps": "mpeg", "mpeg-ts": "mpegts"}
 _MIN_JPEG_BYTES = 5000  # smaller than a real frame => a decode artifact
@@ -178,7 +185,18 @@ async def open_stream(
             )
         msg = f"VTDU StreamInfoRsp result={result}"
         raise StreamError(msg)
-    return vtdu_reader, vtdu_writer, field_str(rsp, 4)
+    stream_ssn = field_str(rsp, 4)
+    # VTDU endpoint for this session: filter a packet capture on this ip:port to
+    # isolate the media flow and inspect the ~27 s drop / keepalive handling.
+    _LOGGER.debug(
+        "%s: VTDU %s:%s stream=%s keepalive=%s",
+        camera.serial,
+        vtdu_ip,
+        vtdu_port,
+        stream,
+        "on" if stream_ssn else "off",
+    )
+    return vtdu_reader, vtdu_writer, stream_ssn
 
 
 async def _capture_session(
@@ -193,15 +211,16 @@ async def _capture_session(
     loop = asyncio.get_running_loop()
     frames = _FrameReader(reader)
     depacketizer = HevcDepacketizer()
-    keepalive = stream_ssn.encode() if stream_ssn else None
     last_ka = loop.time()
+    ka_seq = 1
     transport: str | None = None
     out = bytearray()
 
     while loop.time() < deadline:
-        if keepalive and loop.time() - last_ka >= _KEEPALIVE_INTERVAL:
-            writer.write(build_keepalive(stream_ssn))
+        if stream_ssn and loop.time() - last_ka >= _KEEPALIVE_INTERVAL:
+            writer.write(build_keepalive(stream_ssn, seq=ka_seq))
             await writer.drain()
+            ka_seq += 1
             last_ka = loop.time()
         frame = await frames.next_frame(min(deadline, loop.time() + _READ_SLICE))
         if frame is None:
@@ -236,7 +255,12 @@ async def _decode_jpeg(
     args = [ffmpeg_bin, "-hide_banner", "-v", "error", "-y"]
     if fmt:
         args += ["-f", fmt]
-    args += ["-i", "pipe:0", "-frames:v", "1", "-f", "image2", "pipe:1"]
+    # Decode keyframes only: a mid-GOP window would otherwise yield a P-frame decoded
+    # without its reference, or a half-decoded frame from an incomplete keyframe -
+    # either way a corrupt/partial image. -frames:v 1 then emits the first complete
+    # keyframe, or nothing (better than a half image).
+    args += ["-skip_frame", "nokey", "-i", "pipe:0", "-frames:v", "1"]
+    args += ["-f", "image2", "pipe:1"]
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdin=asyncio.subprocess.PIPE,
@@ -244,6 +268,73 @@ async def _decode_jpeg(
         stderr=asyncio.subprocess.DEVNULL,
     )
     jpeg, _ = await proc.communicate(media)
+    return jpeg if len(jpeg) >= _MIN_JPEG_BYTES else None
+
+
+async def capture_jpeg_from_ts(
+    ffmpeg_bin: str,
+    source: AsyncIterator[bytes],
+    *,
+    timeout: float,  # noqa: ASYNC109 - a caller-supplied capture budget, used via wait_for
+) -> bytes | None:
+    """
+    Decode one complete keyframe JPEG from a *live* MPEG-TS stream.
+
+    Unlike :func:`_decode_jpeg` (which decodes a fixed buffer and can emit a partial
+    frame if the buffer was cut mid-keyframe), this pipes ``source`` into FFmpeg and
+    reads the single frame it emits only once it has fully decoded a keyframe
+    (``-skip_frame nokey -frames:v 1``). FFmpeg controls completeness, so a mid-GOP tap
+    can never yield a half image; it returns None if no keyframe arrives within
+    ``timeout`` or the source is empty (nothing was streaming).
+    """
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg_bin,
+        "-hide_banner",
+        "-v",
+        "error",
+        "-skip_frame",
+        "nokey",
+        "-f",
+        "mpegts",
+        "-i",
+        "pipe:0",
+        "-frames:v",
+        "1",
+        "-f",
+        "image2",
+        "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    assert proc.stdin is not None  # noqa: S101 - PIPE guarantees a writer
+    assert proc.stdout is not None  # noqa: S101 - PIPE guarantees a reader
+
+    async def _feed() -> None:
+        try:
+            async for chunk in source:
+                proc.stdin.write(chunk)
+                await proc.stdin.drain()
+        except BrokenPipeError, ConnectionResetError, OSError:
+            pass  # FFmpeg emitted its frame and exited; stop feeding
+        finally:
+            with contextlib.suppress(OSError):
+                proc.stdin.close()
+
+    feeder = asyncio.create_task(_feed())
+    try:
+        jpeg = await asyncio.wait_for(proc.stdout.read(), timeout)
+    except TimeoutError:
+        jpeg = b""
+    finally:
+        feeder.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await feeder
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
     return jpeg if len(jpeg) >= _MIN_JPEG_BYTES else None
 
 
@@ -295,7 +386,88 @@ async def grab_jpeg(  # noqa: PLR0913 - a session needs camera, token, ffmpeg + 
     return None
 
 
-async def iter_annexb(
+class _SessionTrace:
+    """
+    Per-session diagnostics for the reconnect loops (one DEBUG line per session).
+
+    Temporary instrumentation to explain live-view buffering and correlate with a
+    packet capture: it records the idle ``gap`` before the session, the handshake
+    latency, time-to-first-frame, how long media flowed, frame/byte counts,
+    keepalives sent, and any control-channel frames the server sent back (which would
+    include a keepalive acknowledgement). ``clock`` returns monotonic seconds and is
+    injected for testing.
+    """
+
+    def __init__(
+        self,
+        label: str,
+        serial: str,
+        session: int,
+        *,
+        clock: Callable[[], float],
+        gap: float | None,
+    ) -> None:
+        """Start a trace for a session (``gap`` = idle seconds since the last)."""
+        self._label = label
+        self._serial = serial
+        self._session = session
+        self._clock = clock
+        self._gap = gap
+        self._opened = clock()
+        self._ready: float | None = None
+        self._first: float | None = None
+        self._frames = 0
+        self._bytes = 0
+        self._keepalives = 0
+        self._control: dict[int, int] = {}
+
+    def ready(self) -> None:
+        """Mark the handshake complete (media can now flow)."""
+        self._ready = self._clock()
+
+    def media(self, nbytes: int) -> None:
+        """Record one media chunk of ``nbytes`` handed to the consumer."""
+        if self._first is None:
+            self._first = self._clock()
+        self._frames += 1
+        self._bytes += nbytes
+
+    def keepalive(self) -> None:
+        """Record a keepalive frame sent to the VTDU."""
+        self._keepalives += 1
+
+    def control(self, msgcode: int) -> None:
+        """Record a control-channel frame received (e.g. a keepalive response)."""
+        self._control[msgcode] = self._control.get(msgcode, 0) + 1
+
+    @staticmethod
+    def _span(start: float | None, end: float | None) -> str:
+        if start is None or end is None:
+            return "-"
+        return f"{(end - start) * 1000:.0f}ms"
+
+    def log(self, reason: str) -> None:
+        """Emit the one-line session summary at DEBUG."""
+        now = self._clock()
+        _LOGGER.debug(
+            "%s session #%s [%s]: gap=%s handshake=%s ttff=%s live=%.1fs frames=%s "
+            "bytes=%s keepalive=%s control=%s drop=%s",
+            self._serial,
+            self._session,
+            self._label,
+            "-" if self._gap is None else f"{self._gap:.1f}s",
+            self._span(self._opened, self._ready),
+            self._span(self._ready, self._first),
+            0.0 if self._ready is None else now - self._ready,
+            self._frames,
+            self._bytes,
+            self._keepalives,
+            self._control or "{}",
+            reason,
+        )
+
+
+async def iter_annexb(  # noqa: PLR0915 - reconnect loop + tracing
     camera: EzvizCamera,
     token_factory: Callable[[], Awaitable[str]],
     *,
@@ -312,36 +484,69 @@ async def iter_annexb(
     and is handled separately (C.2b). ``token_factory`` yields a fresh VTDU token per
     reconnect.
     """
+    loop = asyncio.get_running_loop()
+    failures = 0
+    session_no = 0
+    last_end: float | None = None
     while True:
+        if failures >= _MAX_STREAM_FAILURES:
+            _LOGGER.warning(
+                "camera %s: giving up the stream after %s attempts with no media "
+                "(device offline/unreachable)",
+                camera.serial,
+                failures,
+            )
+            return
+        session_no += 1
+        gap = None if last_end is None else loop.time() - last_end
+        trace = _SessionTrace(
+            "rtp", camera.serial, session_no, clock=loop.time, gap=gap
+        )
         try:
             token = await token_factory()
             reader, writer, stream_ssn = await open_stream(camera, token, stream=stream)
         except StreamError as err:
-            _LOGGER.debug("stream handshake failed: %s", err)
+            failures += 1
+            _LOGGER.debug(
+                "stream handshake failed (%s/%s): %s",
+                failures,
+                _MAX_STREAM_FAILURES,
+                err,
+            )
+            last_end = loop.time()
             await asyncio.sleep(_RETRY_BACKOFF)
             continue
+        trace.ready()
 
-        loop = asyncio.get_running_loop()
         frames = _FrameReader(reader)
         depacketizer = HevcDepacketizer()
         last_ka = loop.time()
+        ka_seq = 1
+        produced = False
         try:
             while True:
                 if stream_ssn and loop.time() - last_ka >= _KEEPALIVE_INTERVAL:
-                    writer.write(build_keepalive(stream_ssn))
+                    writer.write(build_keepalive(stream_ssn, seq=ka_seq))
                     await writer.drain()
+                    trace.keepalive()
+                    ka_seq += 1
                     last_ka = loop.time()
                 frame = await frames.next_frame(loop.time() + _READ_SLICE)
                 if frame is None:
                     if frames.closed:
-                        break  # the ~27 s VTDU drop; reconnect below
+                        break  # the VTDU drop; reconnect below
                     continue
-                channel, _msg, body = frame
-                if channel != CH_STREAM or not body:
+                channel, msgcode, body = frame
+                if channel != CH_STREAM:
+                    trace.control(msgcode)  # e.g. a keepalive response
+                    continue
+                if not body:
                     continue
                 if detect_transport(body) == "rtp":
                     chunk = depacketizer.push(body)
                     if chunk:
+                        produced = True
+                        trace.media(len(chunk))
                         # RTP 90 kHz timestamp of the packet completing this access
                         # unit (bytes 4-8 of the RTP header).
                         yield int.from_bytes(body[4:8], "big"), chunk
@@ -349,10 +554,13 @@ async def iter_annexb(
             writer.close()
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
+        trace.log("peer-closed")
+        failures = 0 if produced else failures + 1  # a productive session resets it
+        last_end = loop.time()
         await asyncio.sleep(_RETRY_BACKOFF)
 
 
-async def iter_ps_decrypted(
+async def iter_ps_decrypted(  # noqa: PLR0912, PLR0915 - reconnect loop + tracing
     camera: EzvizCamera,
     token_factory: Callable[[], Awaitable[str]],
     *,
@@ -369,34 +577,63 @@ async def iter_ps_decrypted(
     container carries its own PTS, so the consumer feeds ffmpeg ``-f mpeg`` with no
     pacing needed.
     """
+    loop = asyncio.get_running_loop()
+    failures = 0
+    session_no = 0
+    last_end: float | None = None
     while True:
+        if failures >= _MAX_STREAM_FAILURES:
+            _LOGGER.warning(
+                "camera %s: giving up the stream after %s attempts with no media "
+                "(device offline/unreachable)",
+                camera.serial,
+                failures,
+            )
+            return
+        session_no += 1
+        gap = None if last_end is None else loop.time() - last_end
+        trace = _SessionTrace("ps", camera.serial, session_no, clock=loop.time, gap=gap)
         try:
             token = await token_factory()
             reader, writer, stream_ssn = await open_stream(camera, token, stream=stream)
         except StreamError as err:
-            _LOGGER.debug("PS stream handshake failed: %s", err)
+            failures += 1
+            _LOGGER.debug(
+                "PS stream handshake failed (%s/%s): %s",
+                failures,
+                _MAX_STREAM_FAILURES,
+                err,
+            )
+            last_end = loop.time()
             await asyncio.sleep(_RETRY_BACKOFF)
             continue
+        trace.ready()
 
-        loop = asyncio.get_running_loop()
         frames = _FrameReader(reader)
         last_ka = loop.time()
+        ka_seq = 1
+        produced = False
         decryptor = (
             StreamingPsDecryptor(verification_code) if verification_code else None
         )
         try:
             while True:
                 if stream_ssn and loop.time() - last_ka >= _KEEPALIVE_INTERVAL:
-                    writer.write(build_keepalive(stream_ssn))
+                    writer.write(build_keepalive(stream_ssn, seq=ka_seq))
                     await writer.drain()
+                    trace.keepalive()
+                    ka_seq += 1
                     last_ka = loop.time()
                 frame = await frames.next_frame(loop.time() + _READ_SLICE)
                 if frame is None:
                     if frames.closed:
-                        break  # the ~27 s VTDU drop; reconnect below
+                        break  # the VTDU drop; reconnect below
                     continue
-                channel, _msg, body = frame
-                if channel != CH_STREAM or not body:
+                channel, msgcode, body = frame
+                if channel != CH_STREAM:
+                    trace.control(msgcode)  # e.g. a keepalive response
+                    continue
+                if not body:
                     continue
                 if decryptor is not None:
                     # Decrypt off the event loop - continuous AES during live view
@@ -405,11 +642,16 @@ async def iter_ps_decrypted(
                 else:
                     chunk = body
                 if chunk:
+                    produced = True
+                    trace.media(len(chunk))
                     yield chunk
         finally:
             writer.close()
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
+        trace.log("peer-closed")
+        failures = 0 if produced else failures + 1  # a productive session resets it
+        last_end = loop.time()
         await asyncio.sleep(_RETRY_BACKOFF)
 
 

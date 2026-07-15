@@ -1,6 +1,6 @@
 [project]
 name = "hass-ezviz-stream"
-version = "0.0.0"
+version = "0.2.0"
 description = "Home Assistant integration streaming EZVIZ battery cameras via the EZVIZ cloud"
 readme = "README.md"
 license = "Apache-2.0"

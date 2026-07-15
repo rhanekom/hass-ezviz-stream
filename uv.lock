@@ -1058,7 +1058,7 @@ wheels = [
 
 [[package]]
 name = "hass-ezviz-stream"
-version = "0.0.0"
+version = "0.2.0"
 source = { virtual = "." }
 dependencies = [
     { name = "pycryptodome" },

@@ -143,9 +143,16 @@ def build_streaminfo_request(
     )
 
 
-def build_keepalive(stream_ssn: str) -> bytes:
-    """Return a ready-to-send KeepAlive frame (body = the StreamInfoRsp streamssn)."""
-    return build_frame(CH_MSG, MSG_KEEPALIVE_REQ, stream_ssn.encode())
+def build_keepalive(stream_ssn: str, *, seq: int = 0) -> bytes:
+    """Return a ready-to-send KeepAlive frame.
+
+    The body is the StreamInfoRsp ``streamssn`` wrapped as protobuf field 1 - exactly
+    what the official client sends (verified by packet capture). Sending the raw
+    string instead makes the VTDU FIN the connection ~0.2 s later, which caused the
+    ~5.5 s session churn (heavy live-view buffering and the day/night flip). The
+    official client also increments ``seq`` per keepalive.
+    """
+    return build_frame(CH_MSG, MSG_KEEPALIVE_REQ, _pb_string(1, stream_ssn), seq=seq)
 
 
 # --------------------------------------------------------------------------- #
