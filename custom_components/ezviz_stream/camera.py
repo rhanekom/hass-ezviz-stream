@@ -471,7 +471,20 @@ class EzvizStreamCamera(Camera):
         )
 
     async def _async_grab_live(self) -> bytes | None:
-        """Grab one live frame - a full cloud session that wakes a battery camera."""
+        """
+        Grab one live frame, reusing a viewer's session when one is already up.
+
+        If a live view is in progress we tap its shared broadcast instead of opening a
+        second cloud session: EZVIZ limits concurrent streams per device, so a rival
+        session preempts the live one and restarts the camera's day/night exposure
+        ramp - seen as a grayscale->colour flip on the live video. Tapping reuses the
+        one session (no wake, no collision). Only when nothing is watching do we open
+        an independent, wake-and-retry session. When a tap yields nothing (a rare
+        keyframe timeout) we skip this refresh rather than open a rival session.
+        """
+        if self._broadcast.is_running:
+            return await self._capture_from_live_stream()
+
         api = self._entry.runtime_data.api
         camera = await self._async_lookup_camera()
         if camera is None:
@@ -499,31 +512,36 @@ class EzvizStreamCamera(Camera):
             eager_start=False,
         )
 
-    async def _async_capture_from_live(self) -> None:
+    async def _capture_from_live_stream(self) -> bytes | None:
         """
-        Refresh the thumbnail from the already-running live view (never raises).
+        Decode one keyframe from an already-running live view, or None if idle.
 
         Taps the shared broadcast (``start_if_idle=False``) so it only reads a session
         a viewer already opened - it never starts one, so there is no extra cloud
         session or camera wake. FFmpeg pulls one *complete* keyframe from the live
         stream (see :func:`capture_jpeg_from_ts`), so the tile can never be a half
-        frame; when nothing is streaming the source is empty and we simply skip.
+        frame; when nothing is streaming the source is empty and it returns None.
         """
-        await asyncio.sleep(_STREAM_CAPTURE_DELAY)  # let the viewer's session come up
         if not self._broadcast.is_running:
             # No live view in progress - HA calls stream_source() to register the
             # source at startup too, so don't spawn a decoder for an idle broadcast.
-            return
+            return None
+        async with contextlib.aclosing(
+            self._broadcast.subscribe(start_if_idle=False)
+        ) as stream:
+            return await capture_jpeg_from_ts(
+                get_ffmpeg_manager(self.hass).binary,
+                stream,
+                timeout=_STREAM_CAPTURE_KEYFRAME_TIMEOUT,
+            )
+
+    async def _async_capture_from_live(self) -> None:
+        """Refresh the static thumbnail from the live view on open (never raises)."""
+        await asyncio.sleep(_STREAM_CAPTURE_DELAY)  # let the viewer's session come up
         try:
-            async with contextlib.aclosing(
-                self._broadcast.subscribe(start_if_idle=False)
-            ) as stream:
-                jpeg = await capture_jpeg_from_ts(
-                    get_ffmpeg_manager(self.hass).binary,
-                    stream,
-                    timeout=_STREAM_CAPTURE_KEYFRAME_TIMEOUT,
-                )
-            await self._store_frame(jpeg, persist=True)
+            jpeg = await self._capture_from_live_stream()
+            if jpeg is not None:
+                await self._store_frame(jpeg, persist=True)
         except Exception:  # noqa: BLE001 - a background task must not leak
             _LOGGER.debug(
                 "Live thumbnail capture failed for %s", self._serial, exc_info=True

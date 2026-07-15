@@ -820,6 +820,72 @@ async def test_grab_live_returns_none_when_camera_missing(
     grab.assert_not_called()
 
 
+async def test_grab_live_taps_live_view_instead_of_new_session(
+    hass: HomeAssistant,
+) -> None:
+    """With a viewer's session up, a live grab taps it - no rival cloud session.
+
+    Opening a second session would preempt the live one and reset the camera's
+    day/night exposure (the grayscale->colour flip), so the interval refresh must
+    reuse the running broadcast, not call grab_jpeg or even look the camera up.
+    """
+    api = AsyncMock()
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1"}, api=api)
+
+    async def _empty() -> AsyncIterator[bytes]:
+        yield b""  # a live-view tap (contents irrelevant; the decoder is mocked)
+
+    subscribe = Mock(return_value=_empty())
+    camera._broadcast = SimpleNamespace(subscribe=subscribe, is_running=True)
+
+    with (
+        patch(
+            "custom_components.ezviz_stream.camera.capture_jpeg_from_ts",
+            AsyncMock(return_value=b"LIVE" * 100),
+        ) as capture,
+        patch(
+            "custom_components.ezviz_stream.camera.get_ffmpeg_manager",
+            return_value=SimpleNamespace(binary="ffmpeg"),
+        ),
+        patch("custom_components.ezviz_stream.camera.grab_jpeg", AsyncMock()) as grab,
+    ):
+        result = await camera._async_grab_live()
+
+    assert result == b"LIVE" * 100
+    subscribe.assert_called_once_with(start_if_idle=False)  # tapped, not opened
+    capture.assert_awaited_once()
+    grab.assert_not_called()  # no independent (rival) cloud session
+    api.async_get_cameras.assert_not_called()  # no control-plane lookup either
+
+
+async def test_grab_live_opens_session_when_no_viewer(hass: HomeAssistant) -> None:
+    """With nothing watching, a live grab opens an independent session via grab_jpeg."""
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(
+        return_value=[EzvizCamera("SN1", "Cam", "IPC", 1, 1, streamable=True)]
+    )
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1"}, api=api)  # real broadcast: idle
+
+    with (
+        patch(
+            "custom_components.ezviz_stream.camera.grab_jpeg",
+            AsyncMock(return_value=b"GRAB" * 100),
+        ) as grab,
+        patch(
+            "custom_components.ezviz_stream.camera.get_ffmpeg_manager",
+            return_value=SimpleNamespace(binary="ffmpeg"),
+        ),
+        patch(
+            "custom_components.ezviz_stream.camera.capture_jpeg_from_ts", AsyncMock()
+        ) as capture,
+    ):
+        result = await camera._async_grab_live()
+
+    assert result == b"GRAB" * 100
+    grab.assert_awaited_once()
+    capture.assert_not_awaited()  # idle -> no live tap
+
+
 async def test_static_motion_restores_baseline_on_add(hass: HomeAssistant) -> None:
     """A restart restores the persisted frame as the static_motion baseline."""
     data = {
