@@ -51,6 +51,26 @@ def _aes_key(key: str | bytes) -> bytes:
     return key_bytes.ljust(16, b"\0")[:16]
 
 
+class Decryptor:
+    """The AES-ECB primitive the EZVIZ Image-Encryption decryption is built on.
+
+    Holds the camera key (the verification code, zero-padded/truncated to 16 bytes)
+    as a single reusable ECB cipher; ECB is stateless per block, so one instance
+    decrypts every NAL body in a stream. This is the only cipher in the module - the
+    surrounding :func:`decrypt_ps_video` / :func:`detect_nalu_header_size` logic is
+    clear MPEG-PS/NAL parsing that calls :meth:`decrypt_block` for the encrypted runs.
+    """
+
+    def __init__(self, key: str | bytes) -> None:
+        """Derive the 16-byte AES key from ``key`` and build the ECB cipher once."""
+        self._cipher = _aes(_aes_key(key))
+
+    def decrypt_block(self, data: bytes) -> bytes:
+        """AES-ECB-decrypt ``data`` (a whole number of 16-byte blocks)."""
+        plaintext: bytes = self._cipher.decrypt(data)
+        return plaintext
+
+
 # --------------------------------------------------------------------------- #
 # MPEG-PS stream-id classifiers + PES/packet parsing
 # --------------------------------------------------------------------------- #
@@ -371,7 +391,7 @@ def detect_nalu_header_size(
 ) -> int | None:
     """Detect clear codec-header bytes to preserve before AES: 2=HEVC, 1=H.264
     clear header, 0=H.264 encrypted header. ``default`` if no video NAL evidence."""
-    aes_key = _aes_key(key)
+    decryptor = Decryptor(key)
     scores = {"hevc": 0, "hevc-encrypted-header": 0, "h264-clear-header": 0, "h264": 0}
     for payload_start, payload_end in _video_pes_payload_ranges(data):
         for pos, length in _find_nal_start_codes(data, payload_start, payload_end):
@@ -383,7 +403,7 @@ def detect_nalu_header_size(
                     data[header_pos] & 0x1F
                 )
             if header_pos + AES_BLOCK <= payload_end:
-                decrypted = _aes(aes_key).decrypt(
+                decrypted = decryptor.decrypt_block(
                     bytes(data[header_pos : header_pos + AES_BLOCK])
                 )
                 first = decrypted[0]
@@ -425,7 +445,7 @@ def decrypt_ps_video(
     if nalu_header_size < 0:
         raise ValueError("nalu_header_size must be non-negative")
 
-    aes_key = _aes_key(key)
+    decryptor = Decryptor(key)
 
     def find_nal_start_codes(buf: bytes, start: int, end: int) -> list[tuple[int, int]]:
         if nalu_header_size == 1:
@@ -439,7 +459,7 @@ def decrypt_ps_video(
             header = pos + length
             if header + AES_BLOCK > end:
                 continue
-            dec = _aes(aes_key).decrypt(bytes(buf[header : header + AES_BLOCK]))
+            dec = decryptor.decrypt_block(bytes(buf[header : header + AES_BLOCK]))
             t = dec[0] & 0x1F
             if _is_plausible_hevc_header_bytes(dec[:2]) or (
                 (dec[0] & 0x80) == 0 and 1 <= t <= 23
@@ -475,7 +495,7 @@ def decrypt_ps_video(
                 active_nal_decrypted += 1
                 if len(pending_block) != AES_BLOCK:
                     continue
-                dec = _aes(aes_key).decrypt(bytes(pending_block))
+                dec = decryptor.decrypt_block(bytes(pending_block))
                 for block_pos, dec_byte in zip(pending_positions, dec, strict=True):
                     payload_output[block_pos] = dec_byte
                 pending_positions.clear()
@@ -484,7 +504,7 @@ def decrypt_ps_video(
         def starts_plausible_encrypted_nal(start: int, end: int) -> bool:
             if end - start < AES_BLOCK:
                 return False
-            dec = _aes(aes_key).decrypt(
+            dec = decryptor.decrypt_block(
                 bytes(payload_output[start : start + AES_BLOCK])
             )
             t = dec[0] & 0x1F

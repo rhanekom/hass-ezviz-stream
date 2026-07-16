@@ -20,7 +20,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
-from .decrypt import StreamingPsDecryptor, decrypt_ps_video
+from .decrypt_stream import StreamingPsDecryptor, decrypt_ps_video
 from .ysproto import (
     CH_STREAM,
     MSG_STREAMINFO_RSP,

@@ -151,7 +151,7 @@ All lint rules enabled (`select = ["ALL"]`) with specific exclusions. Target: Py
   `per-file-ignores` in `.ruff.toml`. The exceptions are the `tests/` and
   `scripts/` directories, whose `per-file-ignores` blocks in `.ruff.toml` are the
   accepted place to relax rules wholesale (test/CLI ergonomics), **and the low-level
-  protocol/codec modules** (`custom_components/ezviz_stream/{decrypt,ysproto}.py`),
+  protocol/codec modules** (`custom_components/ezviz_stream/{decrypt_stream,ysproto}.py`),
   which have a scoped `per-file-ignores` block relaxing magic-value/complexity/
   message-style rules — dense bit-twiddling (NAL masks, RTP fields, AES maths) where
   naming every mask hurts readability. Keep that carve-out *narrow* (only those

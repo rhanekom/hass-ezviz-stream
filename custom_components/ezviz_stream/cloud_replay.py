@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from .decrypt import StreamingPsDecryptor
+from .decrypt_stream import StreamingPsDecryptor
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable

@@ -12,7 +12,7 @@ licensed under the Apache License, Version 2.0.
 Specifically:
 
 - The EZVIZ Image-Encryption video decryption in `scripts/ezviz_decrypt.py` and
-  `custom_components/ezviz_stream/decrypt.py` is an independent implementation whose
+  `custom_components/ezviz_stream/decrypt_stream.py` is an independent implementation whose
   algorithm is derived from `pyezvizapi.stream.decrypt_hikvision_ps_video`.
 - The cloud-replay wire protocol in `custom_components/ezviz_stream/cloud_replay.py`
   (frame framing, the open/heartbeat XML control messages, and the message reader) is

@@ -24,7 +24,7 @@ from pyezvizapi.stream import (
     detect_hikvision_ps_video_nalu_header_size as oracle_detect,
 )
 
-from custom_components.ezviz_stream import decrypt as ez
+from custom_components.ezviz_stream import decrypt_stream as ez
 
 CODE = "ezviz-test-code"  # synthetic AES key material for tests, not a real secret
 
