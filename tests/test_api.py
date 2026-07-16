@@ -19,6 +19,7 @@ from custom_components.ezviz_stream.api import (
     InvalidRegion,
     MfaRequired,
     _api_host,
+    _cas_time,
     _first_image_url,
     _normalise_host,
 )
@@ -340,6 +341,113 @@ async def test_get_last_motion_image_none_on_decrypt_failure() -> None:
         side_effect=StillImageDecryptError("wrong code"),
     ):
         assert await api.async_get_last_motion_image("SN1") is None
+
+
+# --- cloud recordings (playback control plane) ------------------------------ #
+# coverPic carries the precise ms start (1752661800000); videoLong is 20 s.
+_CLOUD_VIDEOS = {
+    "meta": {"code": 200},
+    "videos": [
+        {
+            "seqId": "SEQ1",
+            "startTime": "2026-07-16 10:30:00",
+            "stopTime": "2026-07-16 10:30:20",
+            "fileSize": 123456,
+            "crypt": 1,
+            "keyChecksum": "abc123",
+            "streamUrl": "cas.example.com:6500",
+            "storageVersion": 2,
+            "videoLong": 20000,
+            "coverPic": "https://oss.example/c.jpg?startTime=1752661800000",
+        }
+    ],
+}
+
+
+async def _logged_in(routes: dict[str, Any]) -> EzvizCloudApi:
+    api = EzvizCloudApi(_session({"users/login": _LOGIN_OK, **routes}))
+    await api.async_login("user@example.com", "pw", "Europe")
+    return api
+
+
+def test_cas_time_formats_utc() -> None:
+    """CAS timestamps are UTC, no separators, second precision."""
+    assert _cas_time(0) == "19700101T000000Z"
+    assert _cas_time(1000) == "19700101T000001Z"
+
+
+async def test_get_cloud_videos_parses_descriptors() -> None:
+    api = await _logged_in({"clouds/videos/list": _CLOUD_VIDEOS})
+    recordings = await api.async_get_cloud_videos("SN1", 1)
+    assert len(recordings) == 1
+    rec = recordings[0]
+    assert rec.seq_id == "SEQ1"
+    assert rec.file_size == 123456
+    assert rec.crypt is True
+    assert rec.key_checksum == "abc123"
+    assert rec.storage_version == 2
+    assert rec.video_long == 20000
+    assert rec.stream_url == "cas.example.com:6500"
+    # Precise start comes from coverPic; stop = start + duration.
+    assert rec.start_millis == 1752661800000
+    assert rec.stop_millis == 1752661820000
+    assert rec.begin_cas == _cas_time(1752661800000)
+    assert rec.end_cas == _cas_time(1752661820000)
+
+
+async def test_get_cloud_videos_falls_back_to_start_time_string() -> None:
+    """With no coverPic, the UTC startTime string gives the ms start."""
+    video = {"seqId": "S2", "startTime": "2026-07-16 10:30:00", "videoLong": 5000}
+    api = await _logged_in(
+        {"clouds/videos/list": {"meta": {"code": 200}, "videos": [video]}}
+    )
+    rec = (await api.async_get_cloud_videos("SN1", 1))[0]
+    expected = int(
+        api_module.dt.datetime(
+            2026, 7, 16, 10, 30, tzinfo=api_module.dt.UTC
+        ).timestamp()
+        * 1000
+    )
+    assert rec.start_millis == expected
+    assert rec.file_size is None  # absent fileSize -> None
+
+
+async def test_get_cloud_videos_skips_entries_without_seq_id() -> None:
+    videos = [{"startTime": "x"}, {"seqId": "S3", "videoLong": 0}]
+    api = await _logged_in(
+        {"clouds/videos/list": {"meta": {"code": 200}, "videos": videos}}
+    )
+    recordings = await api.async_get_cloud_videos("SN1", 1)
+    assert [r.seq_id for r in recordings] == ["S3"]
+
+
+async def test_get_cloud_videos_empty_when_meta_not_ok() -> None:
+    api = await _logged_in({"clouds/videos/list": {"meta": {"code": 500}}})
+    assert await api.async_get_cloud_videos("SN1", 1) == []
+
+
+async def test_get_cloud_videos_requires_login() -> None:
+    api = EzvizCloudApi(_session({}))
+    with pytest.raises(EzvizStreamApiError):
+        await api.async_get_cloud_videos("SN1", 1)
+
+
+async def test_get_camera_ticket_returns_ticket() -> None:
+    ticket = {"meta": {"code": 200}, "ticketInfo": {"ticket": "TICKET123"}}
+    api = await _logged_in({"cameras/ticketInfo": ticket})
+    assert await api.async_get_camera_ticket("SN1", 1) == "TICKET123"
+
+
+async def test_get_camera_ticket_raises_when_missing() -> None:
+    api = await _logged_in({"cameras/ticketInfo": {"meta": {"code": 200}}})
+    with pytest.raises(CannotConnect):
+        await api.async_get_camera_ticket("SN1", 1)
+
+
+async def test_get_camera_ticket_requires_login() -> None:
+    api = EzvizCloudApi(_session({}))
+    with pytest.raises(EzvizStreamApiError):
+        await api.async_get_camera_ticket("SN1", 1)
 
 
 async def test_get_last_motion_image_none_when_download_not_ok() -> None:

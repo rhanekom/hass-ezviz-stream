@@ -4,43 +4,36 @@ Forward-looking action list. The authoritative *design* is `specification.md`;
 protocol findings are in `reference.md`. Keep this lean - **prune landed work rather
 than accumulating it** (details live in the specs + git history).
 
-## Where we are (2026-07-14)
+## Where we are (2026-07-16)
 
-The integration is built and **live-verified end to end for both camera transports**
-(battery RTP/HEVC and mains/IPC encrypted MPEG-PS). It installs via HACS, passes
-`hassfest` + HACS CI, and has full unit-test coverage. What remains is polish
-(options, MJPEG fallback, docs) and one open design decision (live buffering).
+**v0.2.0 released.** The integration is live-verified end to end for both camera
+transports (battery RTP/HEVC and mains/IPC encrypted MPEG-PS), installs via HACS,
+passes `hassfest` + HACS CI, and has full unit-test coverage. What remains is polish
+(options, MJPEG fallback, docs) and the net-add feature backlog.
 
-## Shipped (v0.1)
+## Shipped
 
-High-level features that are done and verified. Implementation lives in the code +
-git history; this list is the feature-level summary.
+Done and verified; details live in the code + git history.
 
-- **Account + camera setup.** Own two-step config flow: account (email / password /
-  region, validated) then per-camera add, each with its own Image-Encryption
-  verification code. Per-camera **reconfigure**, account **reauth**, and a **frame-grab
-  validation** on save (retry / save-anyway soft block). Simple form with an
-  **Advanced** section (thumbnail source, snapshot refresh interval, main/sub
-  stream; battery cams default to **static-then-newer-motion** + **sub stream** + a
-  long interval) and a **battery-drain warning**. Account **options flow** tunes max
-  concurrent snapshot fetches. Camera entities link to the official `ezviz` device.
-- **Cloud protocol core (no runtime `pyezvizapi`).** Hand-rolled region login,
-  device discovery, VTDU token, and the VTM/VTDU `ysproto` handshake; RTP/RFC-7798
-  HEVC depacketizer; MPEG-PS transport; our own AES-ECB Image-Encryption decryptor
-  (one-shot + an incremental streaming variant), byte-for-byte oracle-validated.
-  Reconnect across the ~27 s VTDU drop + KeepAlive.
-- **Live view.** On-demand local HTTP MPEG-TS view, fanned out from a **single**
-  per-camera cloud session to go2rtc (WebRTC), the HLS `stream` component, and
-  snapshots - so a dashboard never opens concurrent sessions. Streams only while
-  watched (battery-friendly). RTP-clock playback pacing keeps timing smooth. Both
-  transports confirmed live in HA.
-- **Snapshots.** On-demand JPEG grab, cached (battery cams poll far less), and the
-  last good frame is retained across restarts so tiles never go blank. Battery cams
-  default to the **last cloud motion image** as their thumbnail (fetched over HTTPS
-  from the alarms API, no camera wake; still-image `hikencodepicture` payloads
-  decrypted with the verification code), seeded once with a live grab if none exists.
-- **Tooling / CI.** `hassfest` + HACS validation green; duplicate-code pre-commit
-  hook; account credentials stay in memory only (no secrets on disk).
+- **v0.2** - live-session thumbnails, per-camera H.264 transcode, keepalive fix
+  (ended the ~5.5 s VTDU churn), offline/reconnect hardening. See the v0.2.0 release
+  and git history for detail.
+
+**v0.1:**
+
+- **Setup / config flow** - two-step (validated account, then per-camera add with
+  its own verification code); reconfigure, reauth, frame-grab validation on save,
+  Advanced options, battery-drain warning; entities link to the official `ezviz`
+  device.
+- **Cloud protocol core (no runtime `pyezvizapi`)** - region login, device
+  discovery, VTDU token, `ysproto` handshake; RTP/RFC-7798 HEVC depacketizer; MPEG-PS
+  transport; oracle-validated AES-ECB decryptor; reconnect across the ~27 s VTDU drop.
+- **Live view** - on-demand local MPEG-TS view fanned out from a single per-camera
+  cloud session (go2rtc/WebRTC, HLS, snapshots); streams only while watched;
+  RTP-clock pacing; both transports confirmed live.
+- **Snapshots** - on-demand cached JPEG grab, last good frame retained across
+  restarts; battery cams default to the last cloud motion image (no camera wake).
+- **Tooling / CI** - `hassfest` + HACS green; duplicate-code hook; creds in memory only.
 
 ## Locked decisions (details in `specification.md`)
 
@@ -69,6 +62,38 @@ git history; this list is the feature-level summary.
 - [ ] **README / docs** - install + configuration.
 - [ ] **HACS brands** - PR icon/logo assets to `home-assistant/brands` before
       default-store submission (CI currently ignores the `brands` check).
+
+## Feature backlog (net-add vs official `ezviz`)
+
+**Constraint: net-add only** - never duplicate the official `ezviz` integration.
+It already ships PTZ (buttons), privacy/defence switches, sound-alarm siren,
+firmware update, night-vision / work-mode selects, floodlight light, sensitivity
+number, arm/disarm, and motion/alarm sensors - all out of scope. Only build what it
+lacks. No runtime `pyezvizapi` (port behaviour into `api.py`, as with auth/decrypt).
+
+- [ ] **Recordings / playback (HIGH VALUE).** Cloud-stored and SD-card clip
+      playback / event timeline. The official integration has **no** recordings or
+      playback - it only reports recording *status*. This is the biggest net-add and
+      a natural extension of our cloud transport (`pyezvizapi` reference:
+      `save_clip`, `get_device_records`, `download_alarm_image`).
+- [ ] **MQTT push notifications (valuable).** Official `ezviz` is polling-only
+      (`paho_mqtt` is only a transitive `loggers` entry; no client is started), so
+      real-time push is net-add. Use it to drive event-based snapshot refresh and cut
+      battery-cam wakes - an enhancement to our own on-demand stream/snapshot path,
+      not a duplicate motion sensor. Port `pyezvizapi.mqtt.MQTTClient`:
+      - **Handshake (plain HTTPS on the token's `pushAddr`):** register (-> `clientId`)
+        -> start (-> `ticket`) -> connect broker `pushAddr:1882` TCP MQTTv3.1.1,
+        subscribe `"<appKey>/#"` QoS 2 -> stop tells the server to stop pushing.
+      - **Payload:** JSON whose `ext` is a comma-separated string decoded to fields:
+        `channel_type, time, device_serial, channel_no, alert_type_code,
+        default_pic_url, media_url_alt1/2, resource_type, status_flag, file_id,
+        is_encrypted, picChecksum, is_dev_video, metadata, msgId, image, device_name,
+        reserved, sequence_number`. `device_serial` + `alert_type_code` + `time`
+        target the refresh; `default_pic_url` (+ `is_encrypted`) is a fresh alarm
+        image, replacing our alarms-API poll.
+      - **Runtime dep:** needs an MQTT client - prefer `aiomqtt` (asyncio) over
+        paho's background thread to fit HA's loop. Poll the device first to check
+        push/notifications are enabled.
 
 ## Later / nice-to-have
 

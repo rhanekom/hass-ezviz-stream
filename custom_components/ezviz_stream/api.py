@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import datetime as dt
 import hashlib
 import json
 import logging
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, NamedTuple
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import aiohttp
 
@@ -35,6 +38,16 @@ _PAGELIST_PATH = (
 )
 # Most recent motion/alarm event (with its stored still image); limit=1 = latest.
 _ALARM_PATH = "/v3/alarms/v2/advanced?queryType=-1&limit=1&stype=-1&deviceSerials="
+
+# Cloud recordings (playback): list stored clips, then fetch a per-clip playback
+# ticket. The clip bytes themselves come over the cloud-replay socket (streaming
+# module), not here - this is just the control plane (doc/reference.md, recordings).
+_CLOUD_VIDEOS_PATH = "/v3/clouds/videos/list"
+_CAMERA_TICKET_PATH = "/v3/cameras/ticketInfo"
+_DEFAULT_CLOUD_LIMIT = 20
+_CLOUD_VIDEO_TYPE = 2  # 2 = event/motion clips (the EZVIZ app default)
+_DEFAULT_STORAGE_VERSION = 2
+_CAS_TIME_FORMAT = "%Y%m%dT%H%M%SZ"  # EZVIZ "CAS" playback time (UTC), reference
 
 # Desktop/Studio client persona - load-bearing: the mobile persona doesn't reliably
 # surface VTM routing data (doc/reference.md A.1/A.2).
@@ -116,6 +129,55 @@ class EzvizCamera:
     def picker_label(self) -> str:
         """Config-flow picker label: 'Name (Serial)', or just the serial if unnamed."""
         return f"{self.name} ({self.serial})" if self.name else self.serial
+
+
+@dataclass(slots=True)
+class CloudRecording:
+    """
+    A cloud-stored clip discovered for a camera, with the fields playback needs.
+
+    ``start_millis`` is the clip start as epoch milliseconds (None when the
+    descriptor carried no parseable time); ``begin_cas``/``end_cas`` are the same
+    range formatted for the cloud-replay open request. ``crypt`` marks a clip whose
+    bytes are AES-encrypted (decrypted with the camera verification code, like the
+    live IPC transport).
+    """
+
+    seq_id: str
+    start_time: str  # raw descriptor string, e.g. "2026-07-16 10:30:00" (UTC)
+    stop_time: str
+    start_millis: int | None
+    video_long: int  # clip duration in milliseconds
+    file_size: int | None
+    storage_version: int
+    crypt: bool
+    key_checksum: str
+    stream_url: str | None  # "host:port" of the cloud-replay server, when present
+
+    @property
+    def stop_millis(self) -> int | None:
+        """Clip end as epoch milliseconds (start + duration), or None if unknown."""
+        if self.start_millis is None:
+            return None
+        return self.start_millis + self.video_long
+
+    @property
+    def begin_cas(self) -> str | None:
+        """Clip start formatted as an EZVIZ CAS timestamp, or None if unknown."""
+        return None if self.start_millis is None else _cas_time(self.start_millis)
+
+    @property
+    def end_cas(self) -> str | None:
+        """Clip end formatted as an EZVIZ CAS timestamp, or None if unknown."""
+        stop = self.stop_millis
+        return None if stop is None else _cas_time(stop)
+
+
+def _cas_time(millis: int) -> str:
+    """Format epoch milliseconds as the UTC CAS timestamp the replay server expects."""
+    return dt.datetime.fromtimestamp(millis / 1000, tz=dt.UTC).strftime(
+        _CAS_TIME_FORMAT
+    )
 
 
 def _api_host(region: str) -> str:
@@ -205,6 +267,49 @@ def _deep_find(obj: Any, key: str) -> Any:
             if (found := _deep_find(value, key)) is not None:
                 return found
     return None
+
+
+def _cloud_start_millis(video: dict[str, Any]) -> int | None:
+    """
+    Return a cloud clip's start time as epoch ms (reference: coverPic query first).
+
+    The precise millisecond start lives in the ``coverPic`` URL's ``startTime``
+    query param; the top-level ``startTime`` is a coarser UTC string fallback.
+    """
+    cover = video.get("coverPic")
+    if isinstance(cover, str):
+        values = parse_qs(urlparse(cover).query).get("startTime")
+        if values:
+            with suppress(ValueError):
+                return int(values[0])
+    start = video.get("startTime")
+    if isinstance(start, str):
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            with suppress(ValueError):
+                naive = dt.datetime.strptime(start, fmt)  # noqa: DTZ007 - tz set next
+                return int(naive.replace(tzinfo=dt.UTC).timestamp() * 1000)
+    if isinstance(start, int | float):
+        return int(start)
+    return None
+
+
+def _cloud_recording(video: dict[str, Any]) -> CloudRecording | None:
+    """Build a CloudRecording from a clip descriptor, or None if it has no seqId."""
+    seq_id = video.get("seqId")
+    if not seq_id:
+        return None
+    return CloudRecording(
+        seq_id=str(seq_id),
+        start_time=str(video.get("startTime") or ""),
+        stop_time=str(video.get("stopTime") or ""),
+        start_millis=_cloud_start_millis(video),
+        video_long=int(video.get("videoLong") or 0),
+        file_size=int(video["fileSize"]) if video.get("fileSize") else None,
+        storage_version=int(video.get("storageVersion") or _DEFAULT_STORAGE_VERSION),
+        crypt=bool(video.get("crypt")),
+        key_checksum=str(video.get("keyChecksum") or ""),
+        stream_url=video.get("streamUrl") or None,
+    )
 
 
 class EzvizCloudApi:
@@ -348,6 +453,59 @@ class EzvizCloudApi:
             msg = f"no VTDU tokens returned (retcode={body.get('retcode')})"
             raise CannotConnect(msg)
         return tokens[0]
+
+    async def async_get_cloud_videos(
+        self,
+        serial: str,
+        channel: int,
+        *,
+        limit: int = _DEFAULT_CLOUD_LIMIT,
+        video_type: int = _CLOUD_VIDEO_TYPE,
+    ) -> list[CloudRecording]:
+        """
+        Return the camera's cloud-stored clips, newest first. Requires a login.
+
+        Plain HTTPS (no VTDU session, no camera wake), so it is safe for battery
+        cameras. The returned descriptors feed the media browser and, per clip, the
+        cloud-replay playback session. An empty list means the API reported no clips.
+        """
+        if not self._session_id or not self._host:
+            raise EzvizStreamApiError(_NOT_LOGGED_IN)
+        query = urlencode(
+            {
+                "deviceSerial": serial,
+                "channelNo": channel,
+                "limit": limit,
+                "videoType": video_type,
+            }
+        )
+        body = await self._get(f"{self._host}{_CLOUD_VIDEOS_PATH}?{query}")
+        if (body.get("meta") or {}).get("code") != _HTTP_OK:
+            return []
+        return [
+            recording
+            for video in _deep_find(body, "videos") or []
+            if isinstance(video, dict) and (recording := _cloud_recording(video))
+        ]
+
+    async def async_get_camera_ticket(self, serial: str, channel: int) -> str:
+        """Fetch the per-camera playback ticket for cloud-replay. Requires a login."""
+        if not self._session_id or not self._host:
+            raise EzvizStreamApiError(_NOT_LOGGED_IN)
+        query = urlencode(
+            {
+                "deviceSerial": serial,
+                "channelNo": channel,
+                "supportMultiChannelSharedService": 0,
+            }
+        )
+        body = await self._get(f"{self._host}{_CAMERA_TICKET_PATH}?{query}")
+        info = _deep_find(body, "ticketInfo")
+        ticket = info.get("ticket") if isinstance(info, dict) else None
+        if not ticket:
+            msg = "no camera playback ticket returned"
+            raise CannotConnect(msg)
+        return str(ticket)
 
     async def _async_auth_addr(self) -> str:
         """Resolve (and cache) the auth-node host for token requests."""
