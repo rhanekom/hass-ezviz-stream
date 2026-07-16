@@ -57,11 +57,24 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.21
     hooks:
+      # Format first, then lint: formatting can resolve some lint findings, and it
+      # keeps ruff from re-flagging layout the formatter is about to change.
+      - id: ruff-format
+        name: 🐍 ruff format
       - id: ruff
         name: 🐍 ruff lint
         args: [--fix, --exit-non-zero-on-fix]
-      - id: ruff-format
-        name: 🐍 ruff format
+
+  # Static type checking (config in pyproject.toml [tool.mypy], scoped to the
+  # package). Whole-package run, so run it once whenever any Python file is staged.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: 🔎 mypy
+        entry: uv run mypy
+        language: system
+        pass_filenames: false
+        files: \.py$
 
   # Markdown lint (config in .markdownlint.json).
   - repo: https://github.com/DavidAnson/markdownlint-cli2

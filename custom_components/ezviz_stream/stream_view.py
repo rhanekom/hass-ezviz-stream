@@ -18,10 +18,13 @@ from __future__ import annotations
 import hmac
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from aiohttp import web
-from homeassistant.components.http import HomeAssistantView
+
+# Import from the defining module: homeassistant.components.http re-exports this
+# without an explicit __all__ entry, which mypy's no_implicit_reexport rejects.
+from homeassistant.helpers.http import HomeAssistantView
 
 from .const import DOMAIN
 
@@ -45,7 +48,10 @@ class _Stream:
 
 def _registry(hass: HomeAssistant) -> dict[str, _Stream]:
     """Return (creating if needed) the serial -> stream registry."""
-    return hass.data.setdefault(DOMAIN, {}).setdefault(DATA_STREAMS, {})
+    return cast(
+        "dict[str, _Stream]",
+        hass.data.setdefault(DOMAIN, {}).setdefault(DATA_STREAMS, {}),
+    )
 
 
 def register_stream(

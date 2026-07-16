@@ -67,7 +67,7 @@ _SNAPSHOT_DIR = "ezviz_stream"
 _SNAPSHOT_FILE_MODE = 0o600
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Mapping
 
     from homeassistant.config_entries import ConfigSubentry
     from homeassistant.core import HomeAssistant
@@ -77,7 +77,7 @@ if TYPE_CHECKING:
     from .api import EzvizCamera, MotionImage
 
 
-def _resolve_interval(data: dict[str, object]) -> float:
+def _resolve_interval(data: Mapping[str, object]) -> float:
     """Resolve a camera's snapshot cache TTL from its subentry data (seconds)."""
     if CONF_SNAPSHOT_INTERVAL in data:
         return float(data[CONF_SNAPSHOT_INTERVAL])  # type: ignore[arg-type]
@@ -87,7 +87,7 @@ def _resolve_interval(data: dict[str, object]) -> float:
     return float(DEFAULT_SNAPSHOT_INTERVAL)
 
 
-def _resolve_thumbnail_mode(data: dict[str, object]) -> str:
+def _resolve_thumbnail_mode(data: Mapping[str, object]) -> str:
     """Resolve the thumbnail source, mapping the legacy boolean when needed."""
     if mode := data.get(CONF_THUMBNAIL_MODE):
         return str(mode)

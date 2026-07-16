@@ -18,7 +18,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .decrypt import StreamingPsDecryptor, decrypt_ps_video
 from .ysproto import (
@@ -104,7 +104,7 @@ async def _streaminfo_exchange(
     writer: asyncio.StreamWriter,
     stream_url: str,
     vtm_stream_key: str | None,
-) -> dict[int, list]:
+) -> dict[int, list[Any]]:
     """Send a StreamInfoReq and return the decoded StreamInfoRsp fields."""
     writer.write(build_streaminfo_request(stream_url, vtm_stream_key))
     await writer.drain()
@@ -309,17 +309,18 @@ async def capture_jpeg_from_ts(
     )
     assert proc.stdin is not None  # noqa: S101 - PIPE guarantees a writer
     assert proc.stdout is not None  # noqa: S101 - PIPE guarantees a reader
+    stdin = proc.stdin  # bound local so the None-narrowing holds inside _feed
 
     async def _feed() -> None:
         try:
             async for chunk in source:
-                proc.stdin.write(chunk)
-                await proc.stdin.drain()
+                stdin.write(chunk)
+                await stdin.drain()
         except BrokenPipeError, ConnectionResetError, OSError:
             pass  # FFmpeg emitted its frame and exited; stop feeding
         finally:
             with contextlib.suppress(OSError):
-                proc.stdin.close()
+                stdin.close()
 
     feeder = asyncio.create_task(_feed())
     try:

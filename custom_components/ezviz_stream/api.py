@@ -236,7 +236,7 @@ def _camera_from_resource(
     serial = resource.get("deviceSerial")
     if not serial or int(resource.get("resourceType", 0)) <= 0:
         return None
-    vtm = vtm_map.get(resource.get("resourceId")) or {}
+    vtm = vtm_map.get(resource.get("resourceId") or "") or {}
     info = dev_infos.get(serial, {})
     status = status_map.get(serial) or {}
     return EzvizCamera(
@@ -349,7 +349,7 @@ class EzvizCloudApi:
                 continue
             if code == _MFA_CODE:
                 raise MfaRequired
-            raise InvalidAuth(_AUTH_ERROR_HINTS.get(code, f"login code {code}"))
+            raise InvalidAuth(_AUTH_ERROR_HINTS.get(code or -1, f"login code {code}"))
         msg = "exhausted region-redirect retries"
         raise CannotConnect(msg)
 
@@ -452,7 +452,7 @@ class EzvizCloudApi:
         if not tokens:
             msg = f"no VTDU tokens returned (retcode={body.get('retcode')})"
             raise CannotConnect(msg)
-        return tokens[0]
+        return str(tokens[0])
 
     async def async_get_cloud_videos(
         self,
@@ -522,8 +522,11 @@ class EzvizCloudApi:
             auth = _normalise_host(_deep_find(body, "authAddr"))
         except CannotConnect:
             auth = None
-        self._auth_addr = auth or self._host
-        return self._auth_addr
+        resolved = auth or self._host
+        if resolved is None:  # only reachable if called before login (host unset)
+            raise EzvizStreamApiError(_NOT_LOGGED_IN)
+        self._auth_addr = resolved
+        return resolved
 
     async def _post(self, url: str, data: dict[str, str]) -> dict[str, Any]:
         return await self._request("post", url, data=data)

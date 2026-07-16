@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from .stream import iter_annexb, iter_ps_decrypted
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
     from .api import EzvizCloudApi
 
@@ -250,7 +250,7 @@ class CameraBroadcast:
         """True while an upstream session is live (something is being served)."""
         return self._task is not None and not self._task.done()
 
-    async def subscribe(self, *, start_if_idle: bool = True) -> AsyncIterator[bytes]:
+    async def subscribe(self, *, start_if_idle: bool = True) -> AsyncGenerator[bytes]:
         """
         Yield MPEG-TS chunks for one consumer, sharing the single upstream session.
 

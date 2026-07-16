@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import struct
+from typing import Any
 
 # --- framing (reference.md B.1) --------------------------------------------- #
 MAGIC = 0x24
@@ -53,10 +54,11 @@ def _read_varint(data: bytes, i: int) -> tuple[int, int]:
         shift += 7
 
 
-def decode_protobuf(data: bytes) -> dict[int, list]:
+def decode_protobuf(data: bytes) -> dict[int, list[Any]]:
     """Decode a flat protobuf message into {field_number: [values]}."""
-    fields: dict[int, list] = {}
+    fields: dict[int, list[Any]] = {}
     i = 0
+    val: Any  # a varint int (wire 0) or the raw bytes of a length/fixed field
     while i < len(data):
         try:
             tag, i = _read_varint(data, i)
@@ -78,7 +80,7 @@ def decode_protobuf(data: bytes) -> dict[int, list]:
     return fields
 
 
-def field_str(fields: dict[int, list], fn: int) -> str | None:
+def field_str(fields: dict[int, list[Any]], fn: int) -> str | None:
     """Return field ``fn`` decoded as UTF-8 text, or None."""
     vals = fields.get(fn)
     if not vals or not isinstance(vals[0], bytes | bytearray):

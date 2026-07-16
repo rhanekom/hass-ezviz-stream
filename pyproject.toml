@@ -43,6 +43,25 @@ dev = [
 [tool.uv]
 package = false
 
+# Static type checking. Scoped to the shipped integration only (like the pip-audit
+# hook is scoped to our deps): Home Assistant's dynamic surface and the tests are
+# out of scope, so `uv run mypy` and the mypy pre-commit hook both check just the
+# package. strict=true already implies most flags below; they are spelled out to
+# document intent. If a test suite type-check is wanted later, add it under a
+# relaxed [[tool.mypy.overrides]] rather than loosening the package rules.
+[tool.mypy]
+python_version = "3.14"
+files = ["custom_components/ezviz_stream"]
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+check_untyped_defs = true
+no_implicit_reexport = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
 [tool.pytest.ini_options]
 # pytest-homeassistant-custom-component (and the aiohttp/asyncio plugins it pulls
 # in) register async autouse fixtures; "auto" mode lets pytest-asyncio drive them
