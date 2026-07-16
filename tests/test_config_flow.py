@@ -35,6 +35,7 @@ from custom_components.ezviz_stream.const import (
     CONF_IS_BATTERY,
     CONF_IS_ENCRYPTED,
     CONF_MAX_SNAPSHOTS,
+    CONF_RECORDINGS_MODE,
     CONF_REGION,
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
@@ -46,6 +47,7 @@ from custom_components.ezviz_stream.const import (
     DEFAULT_SNAPSHOT_INTERVAL,
     DEFAULT_SNAPSHOT_INTERVAL_BATTERY,
     DOMAIN,
+    RECORDINGS_MODE_DEFAULT,
     THUMBNAIL_INTERVAL,
     THUMBNAIL_MOTION,
     THUMBNAIL_STATIC_MOTION,
@@ -232,6 +234,7 @@ async def test_add_camera_subentry(hass: HomeAssistant) -> None:
         CONF_SNAPSHOT_INTERVAL: DEFAULT_SNAPSHOT_INTERVAL,  # mains default
         CONF_STREAM: 1,  # main stream by default
         CONF_FORCE_H264: False,  # native HEVC copy by default (go2rtc transcodes)
+        CONF_RECORDINGS_MODE: RECORDINGS_MODE_DEFAULT,  # follow the account setting
         CONF_IS_BATTERY: False,
         # CONF_IS_ENCRYPTED omitted: encryption status is unknown for this test cam
     }
@@ -338,6 +341,7 @@ async def test_reconfigure_camera_subentry(hass: HomeAssistant) -> None:
         CONF_SNAPSHOT_INTERVAL: 900,
         CONF_STREAM: 2,  # switched to sub stream
         CONF_FORCE_H264: False,  # not enabled in this reconfigure
+        CONF_RECORDINGS_MODE: RECORDINGS_MODE_DEFAULT,  # unchanged (account default)
         CONF_IS_BATTERY: False,  # resolved from the account (SN1 is IPC)
         # CONF_IS_ENCRYPTED omitted: _CAMERAS leaves encryption status unknown
     }

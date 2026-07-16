@@ -51,11 +51,13 @@ from .api import (
 from .camera import persist_snapshot
 from .const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_ENABLE_RECORDINGS,
     CONF_FORCE_H264,
     CONF_IS_BATTERY,
     CONF_IS_ENCRYPTED,
     CONF_MAX_SNAPSHOTS,
     CONF_MOTION_THUMBNAIL,
+    CONF_RECORDINGS_MODE,
     CONF_REGION,
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
@@ -64,8 +66,10 @@ from .const import (
     CONF_STREAM,
     CONF_THUMBNAIL_MODE,
     CONF_VERIFICATION_CODE,
+    DEFAULT_ENABLE_RECORDINGS,
     DEFAULT_FORCE_H264,
     DEFAULT_MAX_SNAPSHOTS,
+    DEFAULT_RECORDINGS_MODE,
     DEFAULT_REGION,
     DEFAULT_SNAPSHOT_INTERVAL,
     DEFAULT_SNAPSHOT_INTERVAL_BATTERY,
@@ -75,6 +79,9 @@ from .const import (
     MAX_MAX_SNAPSHOTS,
     MAX_SNAPSHOT_INTERVAL,
     MIN_SNAPSHOT_INTERVAL,
+    RECORDINGS_MODE_DEFAULT,
+    RECORDINGS_MODE_OFF,
+    RECORDINGS_MODE_ON,
     REGION_API_CODES,
     SUB_STREAM,
     THUMBNAIL_INTERVAL,
@@ -111,6 +118,7 @@ def _camera_options_schema(  # noqa: PLR0913 - one form field per editable setti
     snapshot_interval: int,
     stream: int,
     force_h264: bool,
+    recordings_mode: str,
 ) -> vol.Schema:
     """
     Build the schema for a camera's editable settings (add + reconfigure).
@@ -178,6 +186,27 @@ def _camera_options_schema(  # noqa: PLR0913 - one form field per editable setti
                     )
                 ),
                 vol.Required(CONF_FORCE_H264, default=force_h264): BooleanSelector(),
+                vol.Required(
+                    CONF_RECORDINGS_MODE, default=recordings_mode
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(
+                                value=RECORDINGS_MODE_DEFAULT,
+                                label="Use account default",
+                            ),
+                            SelectOptionDict(
+                                value=RECORDINGS_MODE_ON,
+                                label="Show recordings in media library",
+                            ),
+                            SelectOptionDict(
+                                value=RECORDINGS_MODE_OFF,
+                                label="Hide recordings from media library",
+                            ),
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
             }
         ),
         {"collapsed": True},
@@ -226,6 +255,9 @@ def _camera_subentry_data(
         ),
         CONF_STREAM: int(user_input[CONF_STREAM]),
         CONF_FORCE_H264: bool(user_input.get(CONF_FORCE_H264, DEFAULT_FORCE_H264)),
+        CONF_RECORDINGS_MODE: user_input.get(
+            CONF_RECORDINGS_MODE, DEFAULT_RECORDINGS_MODE
+        ),
     }
     if is_battery is not None:  # omit when unknown rather than store a null
         data[CONF_IS_BATTERY] = is_battery
@@ -420,11 +452,17 @@ class EzvizStreamOptionsFlow(OptionsFlow):
         if user_input is not None:
             # NumberSelector yields a float; store an int for a clean semaphore size.
             return self.async_create_entry(
-                data={CONF_MAX_SNAPSHOTS: int(user_input[CONF_MAX_SNAPSHOTS])}
+                data={
+                    CONF_MAX_SNAPSHOTS: int(user_input[CONF_MAX_SNAPSHOTS]),
+                    CONF_ENABLE_RECORDINGS: user_input[CONF_ENABLE_RECORDINGS],
+                }
             )
 
         current = self.config_entry.options.get(
             CONF_MAX_SNAPSHOTS, DEFAULT_MAX_SNAPSHOTS
+        )
+        recordings = self.config_entry.options.get(
+            CONF_ENABLE_RECORDINGS, DEFAULT_ENABLE_RECORDINGS
         )
         return self.async_show_form(
             step_id="init",
@@ -438,6 +476,9 @@ class EzvizStreamOptionsFlow(OptionsFlow):
                             mode=NumberSelectorMode.BOX,
                         )
                     ),
+                    vol.Required(
+                        CONF_ENABLE_RECORDINGS, default=recordings
+                    ): BooleanSelector(),
                 }
             ),
         )
@@ -546,6 +587,7 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
                 ),
                 stream=SUB_STREAM if battery else DEFAULT_STREAM,
                 force_h264=DEFAULT_FORCE_H264,
+                recordings_mode=DEFAULT_RECORDINGS_MODE,
             ),
             errors=errors,
             description_placeholders={
@@ -605,6 +647,9 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
                 snapshot_interval=_stored_interval(subentry.data),
                 stream=subentry.data.get(CONF_STREAM, DEFAULT_STREAM),
                 force_h264=subentry.data.get(CONF_FORCE_H264, DEFAULT_FORCE_H264),
+                recordings_mode=subentry.data.get(
+                    CONF_RECORDINGS_MODE, DEFAULT_RECORDINGS_MODE
+                ),
             ),
             errors=errors,
             description_placeholders={

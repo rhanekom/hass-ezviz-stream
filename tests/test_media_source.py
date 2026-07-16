@@ -13,8 +13,12 @@ from homeassistant.config_entries import ConfigEntryState
 from custom_components.ezviz_stream.api import CloudRecording, EzvizCamera
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_ENABLE_RECORDINGS,
+    CONF_RECORDINGS_MODE,
     CONF_SERIAL,
     DOMAIN,
+    RECORDINGS_MODE_OFF,
+    RECORDINGS_MODE_ON,
 )
 from custom_components.ezviz_stream.media_source import (
     EzvizRecordingsMediaSource,
@@ -59,6 +63,9 @@ def _fake_hass_with_camera() -> tuple[MagicMock, AsyncMock]:
         state=ConfigEntryState.LOADED,
         subentries={"sub1": subentry},
         runtime_data=SimpleNamespace(api=api),
+        options={
+            CONF_ENABLE_RECORDINGS: True
+        },  # recordings are opt-in (off by default)
     )
     hass = MagicMock()
     hass.data = {}
@@ -85,6 +92,38 @@ async def test_browse_root_lists_cameras() -> None:
     assert len(root.children) == 1
     assert root.children[0].identifier == "SN1"
     assert root.children[0].title == "Front door"
+
+
+async def test_browse_root_empty_when_recordings_disabled() -> None:
+    """With the account option off (the default), no cameras are exposed."""
+    hass, _api = _fake_hass_with_camera()
+    hass.config_entries.async_entries.return_value[0].options = {}  # default: disabled
+    source = EzvizRecordingsMediaSource(hass)
+    root = await source.async_browse_media(_item(hass, ""))
+    assert root.children == []
+
+
+async def test_camera_override_on_shows_despite_account_off() -> None:
+    """A camera set to 'on' appears even when the account default is off."""
+    hass, _api = _fake_hass_with_camera()
+    entry = hass.config_entries.async_entries.return_value[0]
+    entry.options = {}  # account default: off
+    entry.subentries["sub1"].data[CONF_RECORDINGS_MODE] = RECORDINGS_MODE_ON
+    source = EzvizRecordingsMediaSource(hass)
+    root = await source.async_browse_media(_item(hass, ""))
+    assert root.children is not None
+    assert [c.identifier for c in root.children] == ["SN1"]
+
+
+async def test_camera_override_off_hides_despite_account_on() -> None:
+    """A camera set to 'off' is hidden even when the account default is on."""
+    hass, _api = _fake_hass_with_camera()  # account on
+    hass.config_entries.async_entries.return_value[0].subentries["sub1"].data[
+        CONF_RECORDINGS_MODE
+    ] = RECORDINGS_MODE_OFF
+    source = EzvizRecordingsMediaSource(hass)
+    root = await source.async_browse_media(_item(hass, ""))
+    assert root.children == []
 
 
 async def test_browse_camera_lists_recordings() -> None:

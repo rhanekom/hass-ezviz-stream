@@ -26,7 +26,17 @@ from homeassistant.components.media_source import (
 )
 from homeassistant.config_entries import ConfigEntryState
 
-from .const import CAMERA_SUBENTRY_TYPE, CONF_SERIAL, DOMAIN
+from .const import (
+    CAMERA_SUBENTRY_TYPE,
+    CONF_ENABLE_RECORDINGS,
+    CONF_RECORDINGS_MODE,
+    CONF_SERIAL,
+    DEFAULT_ENABLE_RECORDINGS,
+    DEFAULT_RECORDINGS_MODE,
+    DOMAIN,
+    RECORDINGS_MODE_DEFAULT,
+    RECORDINGS_MODE_ON,
+)
 from .stream_view import replay_token
 
 if TYPE_CHECKING:
@@ -149,10 +159,23 @@ class EzvizRecordingsMediaSource(MediaSource):
         for entry in entries:
             if entry.state is not ConfigEntryState.LOADED:
                 continue
+            # Recordings in the media library are opt-in (off by default, for privacy).
+            # The account setting is the default; each camera can override it.
+            account_on = entry.options.get(
+                CONF_ENABLE_RECORDINGS, DEFAULT_ENABLE_RECORDINGS
+            )
             for subentry in entry.subentries.values():
                 if subentry.subentry_type != CAMERA_SUBENTRY_TYPE:
                     continue
                 serial = subentry.data.get(CONF_SERIAL)
-                if serial:
+                if not serial:
+                    continue
+                mode = subentry.data.get(CONF_RECORDINGS_MODE, DEFAULT_RECORDINGS_MODE)
+                enabled = (
+                    account_on
+                    if mode == RECORDINGS_MODE_DEFAULT
+                    else mode == RECORDINGS_MODE_ON
+                )
+                if enabled:
                     out.append((entry, serial, subentry.title or serial))
         return out
