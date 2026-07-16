@@ -308,6 +308,33 @@ def test_snapshot_interval_sets_cache_ttl() -> None:
     assert camera._cache_ttl == 120
 
 
+def test_name_and_device_link() -> None:
+    """The camera carries a "Cloud" sub-name and links to the official device.
+
+    ``has_entity_name`` + a "Cloud" sub-name composes to "<device> Cloud", so we
+    don't collide with the official ``ezviz`` camera (the nameless primary entity)
+    on the shared device card. The device identifier reuses the official domain
+    with the serial so HA merges us onto that card (§6.3).
+    """
+    entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(
+            api=AsyncMock(), snapshot_semaphore=asyncio.Semaphore(1)
+        )
+    )
+    camera = EzvizStreamCamera(
+        entry,
+        SimpleNamespace(
+            data={CONF_SERIAL: "SN1"},
+            title="Front door",
+            subentry_id="x",
+        ),
+    )
+
+    assert camera.has_entity_name is True
+    assert camera.name == "Cloud"  # composed as "Front door Cloud" by HA
+    assert camera.device_info["identifiers"] == {(OFFICIAL_EZVIZ_DOMAIN, "SN1")}
+
+
 def test_battery_attribute_from_stored_value() -> None:
     """The stored battery flag is exposed as a read-only camera attribute."""
     entry = SimpleNamespace(

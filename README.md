@@ -105,6 +105,13 @@ work. If it can't - a wrong code, or a battery camera that's asleep or briefly
 unreachable - it lets you **try again** or **save anyway**, so nothing that fails to
 stream is accepted silently.
 
+> **Where the camera appears.** If you also run the official `ezviz` integration,
+> this camera is attached to that camera's **existing device card** (it shares the
+> device's identity), so both live side by side rather than creating a duplicate
+> device. To tell them apart, our entity is named `"<device> Cloud"` (e.g. *Front
+> door Cloud*), while the official one keeps the plain device name. If the official
+> integration isn't installed, we create the device ourselves and work standalone.
+
 ### Changing a camera later
 
 Use the camera's **Reconfigure** action to change its verification code, thumbnail

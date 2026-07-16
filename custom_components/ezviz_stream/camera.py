@@ -165,7 +165,10 @@ class EzvizStreamCamera(Camera):
     """A cloud-streamed EZVIZ camera (one per subentry)."""
 
     _attr_has_entity_name = True
-    _attr_name = None  # the camera is its own device; use the device name
+    # Sub-name so we compose to "<device> Cloud" and don't collide with the
+    # official `ezviz` camera, which is the nameless primary entity on the same
+    # device card (§6.3). Standalone, "<device> Cloud" is harmlessly redundant.
+    _attr_name = "Cloud"
     _attr_supported_features = CameraEntityFeature.STREAM
 
     def __init__(self, entry: EzvizStreamConfigEntry, subentry: ConfigSubentry) -> None:
