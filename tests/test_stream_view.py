@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 from homeassistant.setup import async_setup_component
 
@@ -34,7 +35,7 @@ async def _client(hass: HomeAssistant, hass_client_no_auth):  # noqa: ANN001, AN
 
 async def test_get_streams_for_valid_token(hass, hass_client_no_auth) -> None:  # noqa: ANN001
     """A correct token streams the broadcaster's MPEG-TS chunks."""
-    register_stream(hass, "SN1", "good-token", _FakeBroadcast())
+    register_stream(hass, "SN1", "good-token", _FakeBroadcast(), MagicMock(), "")
     client = await _client(hass, hass_client_no_auth)
 
     resp = await client.get("/api/ezviz_stream/SN1?token=good-token")
@@ -45,7 +46,7 @@ async def test_get_streams_for_valid_token(hass, hass_client_no_auth) -> None:  
 
 async def test_bad_token_is_not_found(hass, hass_client_no_auth) -> None:  # noqa: ANN001
     """A wrong token is rejected as 404 (indistinguishable from an unknown serial)."""
-    register_stream(hass, "SN1", "good-token", _FakeBroadcast())
+    register_stream(hass, "SN1", "good-token", _FakeBroadcast(), MagicMock(), "")
     client = await _client(hass, hass_client_no_auth)
 
     resp = await client.get("/api/ezviz_stream/SN1?token=wrong")

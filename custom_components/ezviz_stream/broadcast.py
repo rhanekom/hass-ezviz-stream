@@ -137,6 +137,75 @@ async def mpegts_source(  # noqa: PLR0913 - one live source needs api, camera + 
         await _terminate(ffmpeg)
 
 
+async def mp4_replay_source(
+    ffmpeg_bin: str, ps_source: AsyncIterator[bytes]
+) -> AsyncIterator[bytes]:
+    """
+    Transcode a decrypted cloud-replay MPEG-PS clip to fragmented H.264 MP4.
+
+    ``ps_source`` is the decrypted MPEG-PS from
+    :func:`cloud_replay.iter_cloud_replay_ps`. ffmpeg re-encodes the video HEVC->H.264
+    (browser-universal) into a fragmented MP4 that streams progressively to a browser
+    ``<video>``. Audio is dropped for now - the cloud clip's AAC does not decode
+    cleanly yet (a separate follow-up); video is the deliverable. Runs until
+    ``ps_source`` is exhausted; ffmpeg is torn down on exit.
+    """
+    ffmpeg = await asyncio.create_subprocess_exec(
+        ffmpeg_bin,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "mpeg",
+        "-i",
+        "pipe:0",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-tune",
+        "zerolatency",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",  # audio dropped pending the cloud-clip AAC follow-up
+        "-movflags",
+        "frag_keyframe+empty_moov+default_base_moof",
+        "-f",
+        "mp4",
+        "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    assert ffmpeg.stdin is not None  # noqa: S101 - PIPE guarantees a writer
+    assert ffmpeg.stdout is not None  # noqa: S101 - PIPE guarantees a reader
+    stdin = ffmpeg.stdin
+
+    async def _feed() -> None:
+        try:
+            async for chunk in ps_source:
+                stdin.write(chunk)
+                await stdin.drain()
+        except BrokenPipeError, ConnectionResetError:
+            pass  # ffmpeg exited; the reader side will see EOF and clean up
+        finally:
+            with contextlib.suppress(OSError):
+                stdin.close()
+
+    feeder = asyncio.create_task(_feed())
+    try:
+        while True:
+            chunk = await ffmpeg.stdout.read(_TS_READ)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        feeder.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await feeder
+        await _terminate(ffmpeg)
+
+
 def _s32(value: int) -> int:
     """Interpret a 32-bit RTP-timestamp delta as signed (handles the clock wrap)."""
     return ((value + 0x80000000) & 0xFFFFFFFF) - 0x80000000

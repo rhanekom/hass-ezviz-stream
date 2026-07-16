@@ -266,7 +266,14 @@ class EzvizStreamCamera(Camera):
 
     async def async_added_to_hass(self) -> None:
         """Register the broadcaster and restore the last frame as a failure fallback."""
-        register_stream(self.hass, self._serial, self._token, self._broadcast)
+        register_stream(
+            self.hass,
+            self._serial,
+            self._token,
+            self._broadcast,
+            self._entry.runtime_data.api,
+            self._verification_code,
+        )
         # Restore for failure-fallback only: leave _image_at at 0 so the frame is
         # treated as stale and the next request still attempts a fresh grab, falling
         # back to the restored frame only if that grab fails (no cold-start blank).

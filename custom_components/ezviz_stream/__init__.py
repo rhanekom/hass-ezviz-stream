@@ -22,7 +22,7 @@ from .const import (
     DOMAIN,
     OFFICIAL_EZVIZ_DOMAIN,
 )
-from .stream_view import EzvizStreamMediaView
+from .stream_view import EzvizReplayView, EzvizStreamMediaView
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -82,6 +82,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: EzvizStreamConfigEntry) 
     domain_data = hass.data.setdefault(DOMAIN, {})
     if "http" in hass.config.components and not domain_data.get(_VIEW_REGISTERED):
         hass.http.register_view(EzvizStreamMediaView(hass))
+        hass.http.register_view(EzvizReplayView(hass))
         domain_data[_VIEW_REGISTERED] = True
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     # Reload when a camera is added or reconfigured so its entity is (re)created.
