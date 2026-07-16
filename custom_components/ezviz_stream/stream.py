@@ -667,9 +667,9 @@ async def stream_annexb(
     Write the continuous Annex-B HEVC stream to ``out`` (blocking file-like).
 
     Thin wrapper over :func:`iter_annexb` for the standalone CLI producer
-    (``producer.py``); the integration itself consumes ``iter_annexb`` in-process via
-    :mod:`broadcast`. Runs until cancelled. The RTP timestamp is unused here (the CLI
-    just dumps the bitstream).
+    (``scripts/ezviz_producer.py``); the integration itself consumes ``iter_annexb``
+    in-process via :mod:`broadcast`. Runs until cancelled. The RTP timestamp is unused
+    here (the CLI just dumps the bitstream).
     """
     async for _rtp_ts, chunk in iter_annexb(camera, token_factory, stream=stream):
         out.write(chunk)

@@ -322,7 +322,6 @@ hass-ezviz-stream/
     decrypt.py        # AES-ECB Image-Encryption decryptor (one-shot + streaming)
     broadcast.py      # on-demand MPEG-TS broadcaster (one session, fanned out)
     stream_view.py    # token-guarded HTTP MPEG-TS view go2rtc pulls
-    producer.py       # standalone CLI diagnostic (not used at runtime)
     manifest.json     # requirements: pycryptodome (no pyEzvizApi)
   doc/specification.md
 ```

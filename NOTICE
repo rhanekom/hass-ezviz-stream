@@ -9,8 +9,15 @@ This product includes software derived from pyEzvizApi
 (https://github.com/RenierM26/pyEzvizApi), Copyright the pyEzvizApi authors,
 licensed under the Apache License, Version 2.0.
 
-Specifically, the EZVIZ Image-Encryption video decryption in
-`scripts/ezviz_decrypt.py` (and its eventual home in the integration) is an
-independent implementation whose algorithm is derived from
-`pyezvizapi.stream.decrypt_hikvision_ps_video`. pyEzvizApi is used only as a
-development/test dependency (a decryption oracle); it is NOT a runtime dependency.
+Specifically:
+
+- The EZVIZ Image-Encryption video decryption in `scripts/ezviz_decrypt.py` and
+  `custom_components/ezviz_stream/decrypt.py` is an independent implementation whose
+  algorithm is derived from `pyezvizapi.stream.decrypt_hikvision_ps_video`.
+- The cloud-replay wire protocol in `custom_components/ezviz_stream/cloud_replay.py`
+  (frame framing, the open/heartbeat XML control messages, and the message reader) is
+  ported from the cloud-replay functions in `pyezvizapi.stream` (e.g.
+  `download_ezviz_cloud_replay`).
+
+pyEzvizApi is used only as a development/test dependency (a protocol reference and
+decryption oracle); it is NOT a runtime dependency.

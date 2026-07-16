@@ -206,6 +206,14 @@ Since v0.1.0 the repo uses a two-branch model:
 - **Code must be accompanied by tests.** New/changed integration code lands with
   tests; mock Home Assistant with `pytest-homeassistant-custom-component` (see
   Testing above). The `pytest` pre-commit hook enforces this on every `.py` change.
+- **Debugging / diagnostic tools go in `scripts/`, never in
+  `custom_components/ezviz_stream/`.** The component package ships to users and stays
+  runtime-only; standalone CLIs, live-verification probes, and one-off debugging
+  helpers live in `scripts/` (see `scripts/README.md`), where `.ruff.toml` relaxes
+  CLI-ergonomics rules and the `.env`/`--creds-file` credential pattern lives. Reusable
+  logic a script needs stays in the component (and is tested there); the script only
+  imports it. They add the repo root to `sys.path` to import
+  `custom_components.ezviz_stream.*`.
 - **Research, don't assume** — verify options (including via web search) rather
   than assuming APIs/libraries behave as described.
 - **If something can be caught by a pre-commit hook, add it** — prefer enforcing a

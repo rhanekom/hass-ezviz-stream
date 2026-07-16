@@ -87,6 +87,19 @@ uv run python scripts/parse_ysproto_pcap.py capture.pcapng
 > The `StreamInfoReq` body contains your stream token; review the output before
 > sharing, and redact any token/serial. The opcode itself is not sensitive.
 
+### `ezviz_producer.py` - stream Annex-B HEVC to stdout
+
+Drives the *actual integration* code (`api` + `stream.stream_annexb`) to stream a
+battery camera's continuous Annex-B HEVC to stdout, so the live cloud path can be
+verified outside Home Assistant (pipe into a player). RTP/HEVC only; encrypted
+MPEG-PS (IPC) is not handled here. Unlike the other tools it reads a JSON
+`--creds-file` (`username` / `password` / `region` / `serial` / optional `stream`)
+rather than `.env`:
+
+```bash
+uv run python scripts/ezviz_producer.py --creds-file creds.json | ffplay -
+```
+
 ## Output & safety
 
 - Captures and decoded frames go only to `scripts/out/` (gitignored).
