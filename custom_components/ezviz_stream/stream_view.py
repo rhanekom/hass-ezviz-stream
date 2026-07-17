@@ -28,7 +28,7 @@ from homeassistant.components.ffmpeg import get_ffmpeg_manager
 from homeassistant.helpers.http import HomeAssistantView
 
 from .api import EzvizStreamApiError, SdRecording
-from .broadcast import maybe_decrypt_replay, mp4_replay_source
+from .broadcast import replay_mp4_source
 from .cloud_replay import iter_cloud_replay_ps
 from .const import DOMAIN, SUB_STREAM
 from .stream import iter_playback_ps
@@ -213,11 +213,10 @@ class EzvizReplayView(HomeAssistantView):
             verification_code="",
             file_size=rec.file_size,
         )
-        # Decrypt per-clip only if the data actually needs it (encryption can be
-        # toggled / the code rotated over a camera's life), then serve audio too.
+        # Per-clip decrypt (encryption can be toggled / the code rotated over a
+        # camera's life) and per-clip audio decision (drop undecodable audio).
         ffmpeg = get_ffmpeg_manager(self.hass).binary
-        ps_source = maybe_decrypt_replay(ffmpeg, raw, entry.verification_code)
-        return mp4_replay_source(ffmpeg, ps_source, audio=True)
+        return replay_mp4_source(ffmpeg, raw, entry.verification_code)
 
     def _sd_source(
         self, entry: _Stream, camera: EzvizCamera, ident: str
@@ -235,8 +234,7 @@ class EzvizReplayView(HomeAssistantView):
             begin_cas=segment.begin_cas,
             end_cas=segment.end_cas,
         )
-        # Decrypt per-clip only if the data actually needs it (encryption can be
-        # toggled / the code rotated over a camera's life), then serve audio too.
+        # Per-clip decrypt (encryption can be toggled / the code rotated over a
+        # camera's life) and per-clip audio decision (drop undecodable audio).
         ffmpeg = get_ffmpeg_manager(self.hass).binary
-        ps_source = maybe_decrypt_replay(ffmpeg, raw, entry.verification_code)
-        return mp4_replay_source(ffmpeg, ps_source, audio=True)
+        return replay_mp4_source(ffmpeg, raw, entry.verification_code)

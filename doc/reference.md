@@ -975,6 +975,16 @@ always serves it; audio-disabled cameras (no audio PES) are a no-op.
   Old-key clips are unrecoverable without that key. The probe process is reaped via
   `_terminate` in a `finally` (an orphaned asyncio subprocess transport raises in
   `__del__` on Python 3.14 when GC'd off the loop thread).
+- **Drop undecodable audio (`_probe_audio_encodable`).** The fragmented-MP4 muxer
+  writes *nothing at all* if a mapped output stream never gets a packet, so a bad audio
+  track sinks the (good) video: the AAC encoder fails (`-22`) and ffmpeg emits only the
+  init segment. `_prepare_replay` probes whether the served sample's audio can be
+  AAC-encoded and passes `audio=` to the transcode accordingly - dropping audio
+  (`-an`) when it is absent, corrupt, or encrypted-with-a-key-we-lack. Observed on
+  Front Door **cloud** clips: the decrypted audio is garbage (`sample_rate=0`) even
+  though the video decrypts perfectly - so cloud audio decryption for some cameras is
+  an open follow-up, but playback is video-only rather than failing outright. (Audio
+  decrypt is validated on Deck **SD**; the cloud path differs.)
 - **Keyframe cap on the transcode (`mp4_replay_source -g 30`).** `frag_keyframe`
   flushes an MP4 fragment only at a keyframe; libx264's default 250-frame GOP means a
   short/static clip (no scene-cut keyframe) produces one fragment never flushed until

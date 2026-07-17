@@ -113,6 +113,13 @@ lacks. No runtime `pyezvizapi` (port behaviour into `api.py`, as with auth/decry
 
 ## Later / nice-to-have
 
+- [ ] **Cloud-clip audio decryption (investigate).** Audio decrypt is validated on
+      Deck **SD** but produces garbage on Front Door **cloud** clips (`sample_rate=0`,
+      AAC-encode fails) while the video decrypts perfectly - so the "clear ADTS header +
+      AES-ECB body" scheme doesn't hold across all camera/transport combos. Undecodable
+      audio is currently dropped (`-an`) so video still plays (see `reference.md` E.4).
+      To finish: get a plaintext oracle for a cloud clip (unencrypted camera, or an
+      encryption-off/on pair) and bit-diff the audio transform for the cloud path.
 - [ ] MFA / SMS verification-code login (a differentiator; `Bobsilvio/ezviz_hp7`
       shows the approach works). 2FA fast-follow.
 - [ ] Multi-camera niceties; pre-fill the camera picker from existing `ezviz`

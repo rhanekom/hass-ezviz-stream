@@ -432,7 +432,7 @@ async def test_run_logs_and_ends_on_upstream_error() -> None:
     assert chunks == []  # error -> None sentinel -> no chunks delivered
 
 
-# --- per-clip decryption auto-detection (maybe_decrypt_replay) ---------------- #
+# --- per-clip decrypt + audio decision (_prepare_replay / replay_mp4_source) -- #
 async def _drain(agen: AsyncIterator[bytes]) -> bytes:
     """Concatenate every chunk an async byte source yields."""
     return b"".join([chunk async for chunk in agen])
@@ -444,65 +444,125 @@ async def _src(*chunks: bytes) -> AsyncIterator[bytes]:
         yield chunk
 
 
-async def test_maybe_decrypt_passthrough_without_code() -> None:
-    """With no verification code there is nothing to try, so bytes pass through."""
-    out = await _drain(broadcast.maybe_decrypt_replay("ffmpeg", _src(b"ab", b"cd"), ""))
-    assert out == b"abcd"
+async def test_prepare_replay_passthrough_without_code() -> None:
+    """With no verification code there is nothing to decrypt, so bytes pass through."""
+    with patch.object(
+        broadcast, "_probe_audio_encodable", AsyncMock(return_value=True)
+    ):
+        audio_ok, ps = await broadcast._prepare_replay("ffmpeg", _src(b"ab", b"cd"), "")
+    assert audio_ok is True
+    assert await _drain(ps) == b"abcd"
 
 
-async def test_maybe_decrypt_serves_plaintext_unchanged() -> None:
+async def test_prepare_replay_serves_plaintext_unchanged() -> None:
     """A clip that already decodes raw is served as-is (decrypting would corrupt it)."""
-    with patch.object(broadcast, "_probe_frame_count", AsyncMock(return_value=10)):
-        out = await _drain(
-            broadcast.maybe_decrypt_replay("ffmpeg", _src(b"plain"), "CODE")
+    with (
+        patch.object(broadcast, "_probe_frame_count", AsyncMock(return_value=10)),
+        patch.object(broadcast, "_probe_audio_encodable", AsyncMock(return_value=True)),
+    ):
+        _audio_ok, ps = await broadcast._prepare_replay(
+            "ffmpeg", _src(b"plain"), "CODE"
         )
-    assert out == b"plain"
+    assert await _drain(ps) == b"plain"
 
 
-async def test_maybe_decrypt_decrypts_when_only_decrypted_decodes() -> None:
+async def test_prepare_replay_decrypts_when_only_decrypted_decodes() -> None:
     """Raw fails to decode but decrypted decodes, so the stream is decrypted."""
     fake = MagicMock()
     fake.feed.side_effect = lambda b: b"|" + b
     fake.flush.return_value = b"END"
     with (
         patch.object(broadcast, "_probe_frame_count", AsyncMock(side_effect=[0, 10])),
+        patch.object(broadcast, "_probe_audio_encodable", AsyncMock(return_value=True)),
         patch.object(broadcast, "decrypt_ps_video", lambda b, _k: b),
         patch.object(broadcast, "decrypt_ps_audio", lambda b, _k: b),
         patch.object(broadcast, "StreamingPsDecryptor", return_value=fake),
     ):
-        out = await _drain(
-            broadcast.maybe_decrypt_replay("ffmpeg", _src(b"enc"), "CODE")
-        )
-    assert out == b"|encEND"
+        _audio_ok, ps = await broadcast._prepare_replay("ffmpeg", _src(b"enc"), "CODE")
+        # Drain inside the patch context: _ps_source resolves StreamingPsDecryptor
+        # lazily, so it must still be patched when the generator runs.
+        assert await _drain(ps) == b"|encEND"
 
 
-async def test_maybe_decrypt_unknown_key_serves_raw_and_warns(
+async def test_prepare_replay_unknown_key_serves_raw_and_warns(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """When neither raw nor decrypted decodes (old key), serve raw and warn."""
     with (
         patch.object(broadcast, "_probe_frame_count", AsyncMock(side_effect=[0, 0])),
+        patch.object(
+            broadcast, "_probe_audio_encodable", AsyncMock(return_value=False)
+        ),
         patch.object(broadcast, "decrypt_ps_video", lambda b, _k: b),
         patch.object(broadcast, "decrypt_ps_audio", lambda b, _k: b),
         caplog.at_level("WARNING"),
     ):
-        out = await _drain(
-            broadcast.maybe_decrypt_replay("ffmpeg", _src(b"raw"), "CODE")
-        )
-    assert out == b"raw"
+        _audio_ok, ps = await broadcast._prepare_replay("ffmpeg", _src(b"raw"), "CODE")
+    assert await _drain(ps) == b"raw"
     assert "different encryption code" in caplog.text
 
 
-async def test_maybe_decrypt_streams_chunks_past_probe_boundary() -> None:
+async def test_prepare_replay_drops_undecodable_audio() -> None:
+    """A clip whose audio can't be AAC-encoded reports audio_ok False (video only)."""
+    with (
+        patch.object(broadcast, "_probe_frame_count", AsyncMock(return_value=10)),
+        patch.object(
+            broadcast, "_probe_audio_encodable", AsyncMock(return_value=False)
+        ),
+    ):
+        audio_ok, ps = await broadcast._prepare_replay("ffmpeg", _src(b"plain"), "CODE")
+    assert audio_ok is False
+    assert await _drain(ps) == b"plain"  # video bytes still served
+
+
+async def test_prepare_replay_streams_chunks_past_probe_boundary() -> None:
     """Chunks buffered beyond the probe window still reach the output (plaintext)."""
     with (
         patch.object(broadcast, "_PROBE_BYTES", 3),
         patch.object(broadcast, "_probe_frame_count", AsyncMock(return_value=10)),
+        patch.object(broadcast, "_probe_audio_encodable", AsyncMock(return_value=True)),
     ):
-        out = await _drain(
-            broadcast.maybe_decrypt_replay("ffmpeg", _src(b"abc", b"def"), "CODE")
+        _audio_ok, ps = await broadcast._prepare_replay(
+            "ffmpeg", _src(b"abc", b"def"), "CODE"
         )
-    assert out == b"abcdef"
+    assert await _drain(ps) == b"abcdef"
+
+
+async def test_replay_mp4_source_threads_audio_flag() -> None:
+    """replay_mp4_source passes the audio decision through to mp4_replay_source."""
+    with (
+        patch.object(
+            broadcast,
+            "_prepare_replay",
+            AsyncMock(return_value=(False, _src(b"raw"))),
+        ),
+        patch.object(broadcast, "mp4_replay_source", return_value=_src(b"OUT")) as mp4,
+    ):
+        out = await _drain(broadcast.replay_mp4_source("ffmpeg", _src(b"x"), "CODE"))
+    assert out == b"OUT"
+    assert mp4.call_args.kwargs["audio"] is False  # undecodable audio -> -an
+
+
+async def test_probe_audio_encodable_true_on_zero_rc() -> None:
+    """Audio that the AAC encoder accepts (rc 0) is reported encodable."""
+    proc = MagicMock()
+    proc.communicate = AsyncMock(return_value=(b"", b""))
+    proc.returncode = 0
+    with patch.object(
+        broadcast.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ):
+        assert await broadcast._probe_audio_encodable("ffmpeg", b"data") is True
+
+
+async def test_probe_audio_encodable_false_on_nonzero_rc() -> None:
+    """Undecodable / absent audio (nonzero rc) is reported not encodable."""
+    proc = MagicMock()
+    proc.communicate = AsyncMock(return_value=(b"", b""))
+    proc.returncode = 69  # ffmpeg's AAC-encode failure on the failing clip
+    with patch.object(
+        broadcast.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ):
+        assert await broadcast._probe_audio_encodable("ffmpeg", b"data") is False
 
 
 async def test_probe_frame_count_parses_progress() -> None:
