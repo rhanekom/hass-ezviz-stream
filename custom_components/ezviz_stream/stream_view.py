@@ -28,7 +28,7 @@ from homeassistant.components.ffmpeg import get_ffmpeg_manager
 from homeassistant.helpers.http import HomeAssistantView
 
 from .api import EzvizStreamApiError, SdRecording
-from .broadcast import mp4_replay_source
+from .broadcast import maybe_decrypt_replay, mp4_replay_source
 from .cloud_replay import iter_cloud_replay_ps
 from .const import DOMAIN, SUB_STREAM
 from .stream import iter_playback_ps
@@ -201,7 +201,7 @@ class EzvizReplayView(HomeAssistantView):
         if rec.end_cas is None:
             return None
         ticket = await entry.api.async_get_camera_ticket(camera.serial, camera.channel)
-        ps_source = iter_cloud_replay_ps(
+        raw = iter_cloud_replay_ps(
             stream_url=rec.stream_url,
             ticket=ticket,
             serial=camera.serial,
@@ -210,14 +210,14 @@ class EzvizReplayView(HomeAssistantView):
             begin_cas=rec.begin_cas,
             end_cas=rec.end_cas,
             storage_version=rec.storage_version,
-            verification_code=entry.verification_code if rec.crypt else "",
+            verification_code="",
             file_size=rec.file_size,
         )
-        # Audio is plaintext when unencrypted and decrypted (in iter_cloud_replay_ps)
-        # when encrypted, so it is always available.
-        return mp4_replay_source(
-            get_ffmpeg_manager(self.hass).binary, ps_source, audio=True
-        )
+        # Decrypt per-clip only if the data actually needs it (encryption can be
+        # toggled / the code rotated over a camera's life), then serve audio too.
+        ffmpeg = get_ffmpeg_manager(self.hass).binary
+        ps_source = maybe_decrypt_replay(ffmpeg, raw, entry.verification_code)
+        return mp4_replay_source(ffmpeg, ps_source, audio=True)
 
     def _sd_source(
         self, entry: _Stream, camera: EzvizCamera, ident: str
@@ -227,16 +227,16 @@ class EzvizReplayView(HomeAssistantView):
         if not begin_ms.isdigit() or not end_ms.isdigit():
             return None
         segment = SdRecording(int(begin_ms), int(end_ms), None)
-        ps_source = iter_playback_ps(
+        raw = iter_playback_ps(
             camera,
             entry.api.async_get_vtdu_token,
             stream=SUB_STREAM,
-            verification_code=entry.verification_code if camera.is_encrypted else "",
+            verification_code="",
             begin_cas=segment.begin_cas,
             end_cas=segment.end_cas,
         )
-        # Audio is plaintext when unencrypted and decrypted (in iter_playback_ps) when
-        # encrypted, so it is always available.
-        return mp4_replay_source(
-            get_ffmpeg_manager(self.hass).binary, ps_source, audio=True
-        )
+        # Decrypt per-clip only if the data actually needs it (encryption can be
+        # toggled / the code rotated over a camera's life), then serve audio too.
+        ffmpeg = get_ffmpeg_manager(self.hass).binary
+        ps_source = maybe_decrypt_replay(ffmpeg, raw, entry.verification_code)
+        return mp4_replay_source(ffmpeg, ps_source, audio=True)

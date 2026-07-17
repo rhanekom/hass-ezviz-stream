@@ -15,6 +15,23 @@ passes `hassfest` + HACS CI, and has full unit-test coverage. What remains is po
 
 Done and verified; details live in the code + git history.
 
+- **Recordings & playback (2026-07-17)** - browse and play a camera's **cloud** and
+  **SD-card** recordings in HA's media library (`media_source`: per-camera Cloud / SD
+  subfolders), served as H.264 fragmented MP4. Cloud-replay TLS transport
+  (`cloud_replay.py`) + SD `ysproto` `/playback` (`stream.iter_playback_ps`); record
+  listing via `/v3/clouds/videos/list` and `/v3/streaming/v2/records`. **Video for all
+  cams; audio for all cams** - plaintext, or AES-ECB-decrypted (clear ADTS header) for
+  encrypted cams. Exposure is **opt-in** per account (`enable_recordings`, off by
+  default, for privacy) with a per-camera override. Live-validated (Backyard SD, Deck
+  encrypted). Protocol in `doc/reference.md` Part E / B.10.3.
+- **Recording playback robustness (2026-07-17)** - handle mixed/rotated encryption
+  keys: per-clip decode-probe (`broadcast.maybe_decrypt_replay`) serves each clip
+  plaintext / decrypted / best-effort instead of trusting the crypt flag; `-g 30`
+  keyframe cap on the transcode so short/static clips actually flush fragments and
+  play; always-shown (optional-when-clear) verification-code field for decrypting old
+  clips; and a load-time repair issue for a camera that is encrypted with no code.
+  Live-validated on Front Door / Bar / Deck. See `doc/reference.md` E.4. **Pending:**
+  an in-HA media-browser playback smoke test.
 - **v0.2** - live-session thumbnails, per-camera H.264 transcode, keepalive fix
   (ended the ~5.5 s VTDU churn), offline/reconnect hardening. See the v0.2.0 release
   and git history for detail.
@@ -71,11 +88,10 @@ firmware update, night-vision / work-mode selects, floodlight light, sensitivity
 number, arm/disarm, and motion/alarm sensors - all out of scope. Only build what it
 lacks. No runtime `pyezvizapi` (port behaviour into `api.py`, as with auth/decrypt).
 
-- [ ] **Recordings / playback (HIGH VALUE).** Cloud-stored and SD-card clip
-      playback / event timeline. The official integration has **no** recordings or
-      playback - it only reports recording *status*. This is the biggest net-add and
-      a natural extension of our cloud transport (`pyezvizapi` reference:
-      `save_clip`, `get_device_records`, `download_alarm_image`).
+- [x] **Recordings / playback (HIGH VALUE) - SHIPPED 2026-07-17.** Cloud + SD-card
+      recording playback in the media library, video + audio, all cameras. See the
+      Shipped section above and `doc/reference.md` Part E. (Remaining nice-to-haves: an
+      event-type timeline / date grouping; in-HA browser smoke test.)
 - [ ] **MQTT push notifications (valuable).** Official `ezviz` is polling-only
       (`paho_mqtt` is only a transitive `loggers` entry; no client is started), so
       real-time push is net-add. Use it to drive event-based snapshot refresh and cut

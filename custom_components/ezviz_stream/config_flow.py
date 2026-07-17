@@ -123,18 +123,17 @@ def _camera_options_schema(  # noqa: PLR0913 - one form field per editable setti
     """
     Build the schema for a camera's editable settings (add + reconfigure).
 
-    The verification code is shown up front unless the device is *definitively*
-    unencrypted (``is_encrypted`` is False) - then it is hidden, since no code is
-    needed; it stays visible (and required) when encryption is on, and visible
-    (optional) when the status is unknown. The thumbnail source, refresh interval,
-    and stream (all with sensible defaults) live in a collapsed 'advanced' section.
+    The verification code is always shown. It is *required* when encryption is on,
+    and *optional* otherwise (unencrypted or unknown status) - an unencrypted camera
+    still accepts a code so older recordings from a period when encryption was enabled
+    can be decrypted (see ``_code_hint``). The thumbnail source, refresh interval, and
+    stream (all with sensible defaults) live in a collapsed 'advanced' section.
     """
     schema: dict[Any, Any] = {}
-    if is_encrypted is not False:  # show unless we know it is unencrypted
-        code_key = vol.Required if is_encrypted else vol.Optional
-        schema[code_key(CONF_VERIFICATION_CODE, default=verification_code)] = (
-            TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
-        )
+    code_key = vol.Required if is_encrypted else vol.Optional
+    schema[code_key(CONF_VERIFICATION_CODE, default=verification_code)] = TextSelector(
+        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+    )
     schema[vol.Required(_ADVANCED)] = section(
         vol.Schema(
             {
@@ -281,19 +280,26 @@ def _code_hint(is_encrypted: bool | None) -> str:  # noqa: FBT001 - display form
     """
     Verification-code sentence for the form description, matching the code field.
 
-    Empty when the field is hidden (definitively unencrypted), so the description
-    never tells the user to enter a code that is not shown.
+    The field is always shown; when the camera is unencrypted the code is optional but
+    still useful, so the hint explains it lets older recordings (from a time when
+    Image Encryption was on) be decrypted.
     """
     if is_encrypted is False:
-        return ""
+        return (
+            "This camera is not encrypted, so the code is optional. Enter its "
+            "verification code (the 6-character code on the camera label) only if "
+            "Image Encryption was ever enabled, so recordings from that period can "
+            "still be played; leave blank otherwise. "
+        )
     if is_encrypted:
         return (
             "This camera has Image Encryption on - enter its verification code "
             "(the 6-character code on the camera label). "
         )
     return (
-        "If this camera has Image Encryption on, enter its verification code (the "
-        "6-character code on the camera label); leave blank otherwise. "
+        "If this camera has Image Encryption on - or ever did - enter its "
+        "verification code (the 6-character code on the camera label), so its "
+        "recordings can be decrypted; leave blank otherwise. "
     )
 
 

@@ -245,8 +245,13 @@ class EzvizStreamCamera(Camera):
 
         Battery cameras report "not online" while merely asleep, and streaming is how
         we wake them, so they are never marked unavailable on that basis. When online
-        state is still unknown (None) we stay available and let a grab decide.
+        state is still unknown (None) we stay available and let a grab decide. A camera
+        that is encrypted but has no verification code configured is also unavailable -
+        its stream can only decode to garbage until the code is added (a repair issue
+        asks the user to reconfigure).
         """
+        if self._serial in self._entry.runtime_data.encrypted_without_code:
+            return False
         return not (self._is_battery is False and self._is_online is False)
 
     def _set_online(self, *, online: bool) -> None:

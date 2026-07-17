@@ -430,3 +430,149 @@ async def test_run_logs_and_ends_on_upstream_error() -> None:
     chunks = [chunk async for chunk in caster.subscribe()]
 
     assert chunks == []  # error -> None sentinel -> no chunks delivered
+
+
+# --- per-clip decryption auto-detection (maybe_decrypt_replay) ---------------- #
+async def _drain(agen: AsyncIterator[bytes]) -> bytes:
+    """Concatenate every chunk an async byte source yields."""
+    return b"".join([chunk async for chunk in agen])
+
+
+async def _src(*chunks: bytes) -> AsyncIterator[bytes]:
+    """A trivial async byte source."""
+    for chunk in chunks:
+        yield chunk
+
+
+async def test_maybe_decrypt_passthrough_without_code() -> None:
+    """With no verification code there is nothing to try, so bytes pass through."""
+    out = await _drain(broadcast.maybe_decrypt_replay("ffmpeg", _src(b"ab", b"cd"), ""))
+    assert out == b"abcd"
+
+
+async def test_maybe_decrypt_serves_plaintext_unchanged() -> None:
+    """A clip that already decodes raw is served as-is (decrypting would corrupt it)."""
+    with patch.object(broadcast, "_probe_frame_count", AsyncMock(return_value=10)):
+        out = await _drain(
+            broadcast.maybe_decrypt_replay("ffmpeg", _src(b"plain"), "CODE")
+        )
+    assert out == b"plain"
+
+
+async def test_maybe_decrypt_decrypts_when_only_decrypted_decodes() -> None:
+    """Raw fails to decode but decrypted decodes, so the stream is decrypted."""
+    fake = MagicMock()
+    fake.feed.side_effect = lambda b: b"|" + b
+    fake.flush.return_value = b"END"
+    with (
+        patch.object(broadcast, "_probe_frame_count", AsyncMock(side_effect=[0, 10])),
+        patch.object(broadcast, "decrypt_ps_video", lambda b, _k: b),
+        patch.object(broadcast, "decrypt_ps_audio", lambda b, _k: b),
+        patch.object(broadcast, "StreamingPsDecryptor", return_value=fake),
+    ):
+        out = await _drain(
+            broadcast.maybe_decrypt_replay("ffmpeg", _src(b"enc"), "CODE")
+        )
+    assert out == b"|encEND"
+
+
+async def test_maybe_decrypt_unknown_key_serves_raw_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When neither raw nor decrypted decodes (old key), serve raw and warn."""
+    with (
+        patch.object(broadcast, "_probe_frame_count", AsyncMock(side_effect=[0, 0])),
+        patch.object(broadcast, "decrypt_ps_video", lambda b, _k: b),
+        patch.object(broadcast, "decrypt_ps_audio", lambda b, _k: b),
+        caplog.at_level("WARNING"),
+    ):
+        out = await _drain(
+            broadcast.maybe_decrypt_replay("ffmpeg", _src(b"raw"), "CODE")
+        )
+    assert out == b"raw"
+    assert "different encryption code" in caplog.text
+
+
+async def test_maybe_decrypt_streams_chunks_past_probe_boundary() -> None:
+    """Chunks buffered beyond the probe window still reach the output (plaintext)."""
+    with (
+        patch.object(broadcast, "_PROBE_BYTES", 3),
+        patch.object(broadcast, "_probe_frame_count", AsyncMock(return_value=10)),
+    ):
+        out = await _drain(
+            broadcast.maybe_decrypt_replay("ffmpeg", _src(b"abc", b"def"), "CODE")
+        )
+    assert out == b"abcdef"
+
+
+async def test_probe_frame_count_parses_progress() -> None:
+    """The probe returns the last frame= count FFmpeg reports."""
+    proc = MagicMock()
+    proc.communicate = AsyncMock(
+        return_value=(b"frame=3\nprogress=continue\nframe=  17\nprogress=end\n", b"")
+    )
+    with patch.object(
+        broadcast.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ):
+        assert await broadcast._probe_frame_count("ffmpeg", b"data") == 17
+
+
+async def test_probe_frame_count_zero_when_no_frames() -> None:
+    """No frame= output (undecodable input) yields a zero count."""
+    proc = MagicMock()
+    proc.communicate = AsyncMock(return_value=(b"", b"Invalid data"))
+    with patch.object(
+        broadcast.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ):
+        assert await broadcast._probe_frame_count("ffmpeg", b"data") == 0
+
+
+async def test_mp4_replay_source_caps_keyframe_interval() -> None:
+    """mp4_replay_source must set -g so fragments flush (short/static clips play)."""
+    proc = MagicMock()
+    proc.stdin = MagicMock()
+    proc.stdin.write = MagicMock()
+    proc.stdin.drain = AsyncMock()
+    proc.stdin.close = MagicMock()
+    proc.stdout.read = AsyncMock(return_value=b"")  # end the read loop immediately
+    proc.returncode = 0
+    with patch.object(
+        broadcast.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ) as spawn:
+        async for _ in broadcast.mp4_replay_source("ffmpeg", _src(b""), audio=True):
+            pass
+    args = spawn.call_args.args
+    assert "-g" in args  # keyframe-interval cap present
+    assert args[args.index("-g") + 1] == "30"
+
+
+async def test_probe_frame_count_reaps_process_on_cancel() -> None:
+    """A probe cancelled mid-run still reaps its ffmpeg (no orphaned transport)."""
+    proc = MagicMock()
+    started = asyncio.Event()
+
+    async def _block(_: bytes) -> tuple[bytes, bytes]:
+        started.set()
+        await asyncio.Event().wait()  # never completes; force a cancel
+        return b"", b""
+
+    proc.communicate = _block
+    proc.returncode = None
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+
+    async def _reap() -> None:
+        proc.returncode = 0
+
+    proc.wait = AsyncMock(side_effect=_reap)
+
+    with patch.object(
+        broadcast.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ):
+        task = asyncio.create_task(broadcast._probe_frame_count("ffmpeg", b"x"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    proc.terminate.assert_called_once()  # cleaned up despite the cancellation

@@ -14,9 +14,11 @@ from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.ezviz_stream import (
+    _async_flag_encrypted_without_code,
     async_remove_config_entry_device,
     async_remove_entry,
 )
@@ -667,7 +669,9 @@ def _make_camera(
     """Build a standalone camera entity bound to a fake account entry."""
     entry = SimpleNamespace(
         runtime_data=SimpleNamespace(
-            api=api or AsyncMock(), snapshot_semaphore=asyncio.Semaphore(1)
+            api=api or AsyncMock(),
+            snapshot_semaphore=asyncio.Semaphore(1),
+            encrypted_without_code=set(),
         )
     )
     camera = EzvizStreamCamera(
@@ -1013,6 +1017,15 @@ def test_available_reflects_online_state(
     assert camera.available is expected
 
 
+def test_available_false_when_encrypted_without_code(hass: HomeAssistant) -> None:
+    """A camera flagged encrypted-without-code is unavailable, even when online."""
+    camera = _make_camera(hass, {CONF_SERIAL: "SN1"})
+    camera._is_battery = False
+    camera._is_online = True  # online, but still unavailable while it can't decrypt
+    camera._entry.runtime_data.encrypted_without_code = {"SN1"}
+    assert camera.available is False
+
+
 async def test_stream_source_refuses_offline_mains_camera(hass: HomeAssistant) -> None:
     """An offline mains camera fast-fails so HA never starts a retrying worker."""
     api = AsyncMock(async_get_cameras=AsyncMock(return_value=[_cam(2)]))  # status 2
@@ -1069,3 +1082,80 @@ async def test_removal_stops_orphaned_ha_stream(hass: HomeAssistant) -> None:
     unreg.assert_called_once()
     stream.stop.assert_awaited_once()
     assert camera.stream is None
+
+
+# --- encrypted-without-code load validation ---------------------------------- #
+def _entry_with_cameras(*specs: tuple[str, str]) -> MockConfigEntry:
+    """An account entry with a camera subentry per (serial, verification_code)."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="user@example.com",
+        data=_ACCOUNT,
+        subentries_data=[
+            ConfigSubentryData(
+                data={CONF_SERIAL: serial, CONF_VERIFICATION_CODE: code},
+                subentry_type=CAMERA_SUBENTRY_TYPE,
+                title=serial,
+                unique_id=serial,
+            )
+            for serial, code in specs
+        ],
+    )
+
+
+def _api_with_encryption(**encrypted: bool) -> AsyncMock:
+    """A mock API whose camera list reports each serial's encryption state."""
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(
+        return_value=[
+            EzvizCamera(serial, serial, "IPC", 1, 1, streamable=True, is_encrypted=enc)
+            for serial, enc in encrypted.items()
+        ]
+    )
+    return api
+
+
+async def test_flag_encrypted_without_code(hass: HomeAssistant) -> None:
+    """Only an encrypted camera lacking a code is flagged and gets a repair issue."""
+    entry = _entry_with_cameras(("ENCNC", ""), ("ENCOK", "ABCDEF"), ("CLEAR", ""))
+    entry.add_to_hass(hass)
+    api = _api_with_encryption(ENCNC=True, ENCOK=True, CLEAR=False)
+
+    flagged = await _async_flag_encrypted_without_code(hass, entry, api)
+
+    assert flagged == {"ENCNC"}
+    reg = ir.async_get(hass)
+    assert reg.async_get_issue(DOMAIN, "encrypted_no_code_ENCNC") is not None
+    assert reg.async_get_issue(DOMAIN, "encrypted_no_code_ENCOK") is None
+    assert reg.async_get_issue(DOMAIN, "encrypted_no_code_CLEAR") is None
+
+
+async def test_flag_clears_stale_issue_when_code_added(hass: HomeAssistant) -> None:
+    """Once a code is stored, the camera is unflagged and its issue cleared."""
+    entry = _entry_with_cameras(("ENCNC", ""))
+    entry.add_to_hass(hass)
+    api = _api_with_encryption(ENCNC=True)
+
+    await _async_flag_encrypted_without_code(hass, entry, api)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "encrypted_no_code_ENCNC")
+
+    subentry = next(iter(entry.subentries.values()))
+    hass.config_entries.async_update_subentry(
+        entry, subentry, data={CONF_SERIAL: "ENCNC", CONF_VERIFICATION_CODE: "ABCDEF"}
+    )
+    flagged = await _async_flag_encrypted_without_code(hass, entry, api)
+
+    assert flagged == set()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "encrypted_no_code_ENCNC") is None
+
+
+async def test_flag_skips_when_camera_list_unavailable(hass: HomeAssistant) -> None:
+    """A failure to fetch the camera list is non-fatal: nothing is flagged."""
+    entry = _entry_with_cameras(("ENCNC", ""))
+    entry.add_to_hass(hass)
+    api = AsyncMock()
+    api.async_get_cameras = AsyncMock(side_effect=RuntimeError("boom"))
+
+    flagged = await _async_flag_encrypted_without_code(hass, entry, api)
+
+    assert flagged == set()

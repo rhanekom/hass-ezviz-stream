@@ -16,8 +16,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 from typing import TYPE_CHECKING
 
+from .decrypt_stream import StreamingPsDecryptor, decrypt_ps_audio, decrypt_ps_video
 from .stream import iter_annexb, iter_ps_decrypted
 
 if TYPE_CHECKING:
@@ -36,6 +38,11 @@ _FFMPEG_TERM_TIMEOUT = 5.0
 _RTP_CLOCK = 90000
 _RTP_DISCONTINUITY = 2 * _RTP_CLOCK
 _MAX_PACE_SLEEP = 2.0  # safety cap on a single wait, so a bad timestamp can't stall us
+
+# Per-clip decryption auto-detection (see maybe_decrypt_replay).
+_PROBE_BYTES = 768 * 1024  # buffer roughly one keyframe before deciding
+_PROBE_FRAMES = 24  # cap the decode probe; a valid interpretation reaches this easily
+_PROBE_MIN_FRAMES = 2  # garbage decodes ~0 frames, cleanly separating it from valid
 
 
 async def _spawn_ffmpeg(
@@ -147,9 +154,17 @@ async def mp4_replay_source(
     (:func:`cloud_replay.iter_cloud_replay_ps`) or SD (:func:`stream.iter_playback_ps`)
     recording. ffmpeg re-encodes the video HEVC->H.264 (browser-universal) into a
     fragmented MP4 that streams progressively to a browser ``<video>``. ``audio``
-    re-encodes the clip's AAC track (only correct on an unencrypted camera - an
-    encrypted clip's audio payload is not yet decryptable, so it is dropped there).
-    Runs until ``ps_source`` is exhausted; ffmpeg is torn down on exit.
+    re-encodes the clip's AAC track (plaintext on an unencrypted camera, decrypted
+    upstream on an encrypted one); it is a no-op when the camera has audio disabled
+    (no audio stream). Runs until ``ps_source`` is exhausted; ffmpeg is torn down on
+    exit.
+
+    ``-g 30`` caps the keyframe interval (~1-2 s). ``frag_keyframe`` flushes an MP4
+    fragment only at each keyframe, so without this cap libx264's default 250-frame
+    GOP means a short or static clip (no scene-cut keyframe) produces a single
+    fragment that is never flushed until EOF - the browser only ever receives the
+    init segment and playback never starts. The cap makes fragments flush regularly
+    so progressive playback works for every clip.
     """
     audio_args = ["-c:a", "aac"] if audio else ["-an"]
     ffmpeg = await asyncio.create_subprocess_exec(
@@ -169,6 +184,8 @@ async def mp4_replay_source(
         "zerolatency",
         "-pix_fmt",
         "yuv420p",
+        "-g",
+        "30",
         *audio_args,
         "-movflags",
         "frag_keyframe+empty_moov+default_base_moof",
@@ -206,6 +223,127 @@ async def mp4_replay_source(
         with contextlib.suppress(asyncio.CancelledError):
             await feeder
         await _terminate(ffmpeg)
+
+
+async def _probe_frame_count(ffmpeg_bin: str, ps: bytes) -> int:
+    """
+    Return how many video frames FFmpeg decodes from an MPEG-PS ``ps`` sample.
+
+    A valid interpretation of the sample decodes many frames (capped at
+    :data:`_PROBE_FRAMES`); garbage (wrong/absent decryption) decodes ~0. Audio is
+    ignored (``-an``) so an undecryptable audio track cannot mask the video verdict.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg_bin,
+        "-hide_banner",
+        "-v",
+        "error",
+        "-f",
+        "mpeg",
+        "-i",
+        "pipe:0",
+        "-map",
+        "0:v:0",
+        "-an",
+        "-frames:v",
+        str(_PROBE_FRAMES),
+        "-f",
+        "null",
+        "-",
+        "-progress",
+        "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        out, _ = await proc.communicate(ps)
+    except BrokenPipeError, ConnectionResetError:
+        return 0
+    finally:
+        # Always reap the probe process so its subprocess transport is closed on this
+        # loop. Left to GC (e.g. when the clip is abandoned mid-probe), the transport's
+        # __del__ can run on another thread and raise on Python 3.14.
+        await _terminate(proc)
+    matches = re.findall(rb"frame=\s*(\d+)", out)
+    return int(matches[-1]) if matches else 0
+
+
+async def _sample_needs_decrypt(
+    ffmpeg_bin: str, sample: bytes, verification_code: str
+) -> bool:
+    """
+    Decide whether a recording's first-keyframe ``sample`` must be decrypted.
+
+    Returns False if it already decodes as valid video (plaintext - decrypting would
+    corrupt it) or if it decodes neither raw nor decrypted (almost certainly an
+    old/unknown key, logged and served best-effort); True only when decrypting with
+    ``verification_code`` is what makes it decode.
+    """
+    if await _probe_frame_count(ffmpeg_bin, sample) >= _PROBE_MIN_FRAMES:
+        return False
+    video = await asyncio.to_thread(decrypt_ps_video, sample, verification_code)
+    decrypted = await asyncio.to_thread(decrypt_ps_audio, video, verification_code)
+    if await _probe_frame_count(ffmpeg_bin, decrypted) >= _PROBE_MIN_FRAMES:
+        return True
+    _LOGGER.warning(
+        "Recording clip decoded neither raw nor decrypted - it was likely recorded "
+        "with a different encryption code than the one configured; serving it "
+        "undecrypted (playback may fail)",
+    )
+    return False
+
+
+async def maybe_decrypt_replay(
+    ffmpeg_bin: str,
+    raw_source: AsyncIterator[bytes],
+    verification_code: str,
+) -> AsyncGenerator[bytes]:
+    """
+    Yield a recording's MPEG-PS, decrypting per-clip only when it is actually needed.
+
+    A camera's verification code can change over its lifetime - encryption toggled
+    on/off, or the code rotated - so a single camera's clips may be a mix of
+    plaintext, encrypted with the current code, and encrypted with an old code we no
+    longer hold. Trusting the per-clip ``crypt`` / per-camera ``is_encrypted`` flag and
+    decrypting unconditionally corrupts the plaintext clips. Instead we buffer the
+    first keyframe, decode-probe it (see :func:`_sample_needs_decrypt`), and stream it
+    raw or decrypted accordingly. With no ``verification_code`` there is nothing to
+    try, so the stream passes straight through.
+    """
+    if not verification_code:
+        async for chunk in raw_source:
+            yield chunk
+        return
+
+    buffer = bytearray()
+    exhausted = True
+    async for chunk in raw_source:
+        buffer += chunk
+        if len(buffer) >= _PROBE_BYTES:
+            exhausted = False
+            break
+    sample = bytes(buffer)
+
+    if not await _sample_needs_decrypt(ffmpeg_bin, sample, verification_code):
+        yield sample
+        if not exhausted:
+            async for chunk in raw_source:
+                yield chunk
+        return
+
+    decryptor = StreamingPsDecryptor(verification_code, decrypt_audio=True)
+    first = await asyncio.to_thread(decryptor.feed, sample)
+    if first:
+        yield first
+    if not exhausted:
+        async for chunk in raw_source:
+            out = await asyncio.to_thread(decryptor.feed, chunk)
+            if out:
+                yield out
+    tail = await asyncio.to_thread(decryptor.flush)
+    if tail:
+        yield tail
 
 
 def _s32(value: int) -> int:

@@ -652,7 +652,13 @@ class EzvizCloudApi:
             }
         )
         body = await self._get(f"{self._host}{_SD_RECORDS_PATH}?{query}")
-        if (body.get("meta") or {}).get("code") != _HTTP_OK:
+        meta = body.get("meta") or {}
+        if meta.get("code") != _HTTP_OK:
+            # 2003 = device offline, 2004 = device exception. SD playback needs the
+            # camera reachable (it streams from the device), unlike cloud recordings.
+            _LOGGER.debug(
+                "SD record search for %s returned no records (meta=%s)", serial, meta
+            )
             return []
         return [
             recording

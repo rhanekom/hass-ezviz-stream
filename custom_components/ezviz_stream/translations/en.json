@@ -129,5 +129,11 @@
         "reconfigure_successful": "Camera updated."
       }
     }
+  },
+  "issues": {
+    "encrypted_no_code": {
+      "title": "{camera}: verification code needed",
+      "description": "**{camera}** ({serial}) has Image Encryption enabled but no verification code is configured, so its live stream and recordings can only decode to garbage. Reconfigure the camera and enter its 6-character verification code to restore it."
+    }
   }
 }
