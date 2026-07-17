@@ -15,6 +15,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import zlib
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, NamedTuple
@@ -48,6 +49,15 @@ _DEFAULT_CLOUD_LIMIT = 20
 _CLOUD_VIDEO_TYPE = 2  # 2 = event/motion clips (the EZVIZ app default)
 _DEFAULT_STORAGE_VERSION = 2
 _CAS_TIME_FORMAT = "%Y%m%dT%H%M%SZ"  # EZVIZ "CAS" playback time (UTC), reference
+
+# SD-card recordings: search the on-device record index over a time window. The
+# clip bytes come over the ysproto /playback path (streaming module), not here.
+_SD_RECORDS_PATH = "/v3/streaming/v2/records"
+_DEFAULT_SD_SIZE = 20
+_EPOCH_MS_DIGITS = 13  # a 13-digit integer string is epoch milliseconds
+# The record search wants UTC "YYYY-MM-DD HH:MM:SS" strings; epoch/CAS give a device
+# exception (2004). Verified live against a real camera.
+_SEARCH_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # Desktop/Studio client persona - load-bearing: the mobile persona doesn't reliably
 # surface VTM routing data (doc/reference.md A.1/A.2).
@@ -177,6 +187,106 @@ def _cas_time(millis: int) -> str:
     """Format epoch milliseconds as the UTC CAS timestamp the replay server expects."""
     return dt.datetime.fromtimestamp(millis / 1000, tz=dt.UTC).strftime(
         _CAS_TIME_FORMAT
+    )
+
+
+@dataclass(slots=True)
+class SdRecording:
+    """
+    An SD-card recording segment: a ``[begin, end]`` window on the device.
+
+    Played back over the ysproto ``/playback`` path (streaming module) using the CAS
+    timestamps; there is no per-clip file/ticket like cloud recordings.
+    """
+
+    begin_millis: int
+    end_millis: int
+    record_type: int | None
+
+    @property
+    def begin_cas(self) -> str:
+        """Segment start as an EZVIZ CAS timestamp."""
+        return _cas_time(self.begin_millis)
+
+    @property
+    def end_cas(self) -> str:
+        """Segment end as an EZVIZ CAS timestamp."""
+        return _cas_time(self.end_millis)
+
+    @property
+    def duration_ms(self) -> int:
+        """Segment length in milliseconds."""
+        return max(0, self.end_millis - self.begin_millis)
+
+
+def _search_time(millis: int) -> str:
+    """Format epoch milliseconds as the UTC datetime string the record search wants."""
+    return dt.datetime.fromtimestamp(millis / 1000, tz=dt.UTC).strftime(
+        _SEARCH_TIME_FORMAT
+    )
+
+
+def _record_millis(value: Any) -> int | None:
+    """Parse a record timestamp (epoch s/ms, or a UTC date string) to epoch ms."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        ms = int(value)
+        return ms if ms > _EPOCH_MS_THRESHOLD else ms * 1000
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            ms = int(text)
+            return ms if len(text) >= _EPOCH_MS_DIGITS else ms * 1000
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y%m%dT%H%M%SZ"):
+            with suppress(ValueError):
+                naive = dt.datetime.strptime(text, fmt)  # noqa: DTZ007 - tz set next
+                return int(naive.replace(tzinfo=dt.UTC).timestamp() * 1000)
+    return None
+
+
+def _decode_record_list(body: dict[str, Any]) -> list[Any]:
+    """
+    Return the record list from a search response (plain or base64+zlib JSON).
+
+    The app compresses large record lists as a base64+zlib-encoded JSON string under
+    one of several keys; smaller responses embed a plain list.
+    """
+    for key in ("records", "record", "files", "fileList", "videos", "videoList"):
+        value = _deep_find(body, key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str) and value:
+            with suppress(ValueError, zlib.error, UnicodeDecodeError):
+                raw = zlib.decompress(base64.b64decode(value)).decode()
+                decoded = json.loads(raw)
+                if isinstance(decoded, list):
+                    return decoded
+    return []
+
+
+def _as_int(value: Any) -> int | None:
+    """Return ``value`` as an int if it is an int or a numeric string, else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.lstrip("-").isdigit():
+        return int(value)
+    return None
+
+
+def _sd_recording(item: dict[str, Any]) -> SdRecording | None:
+    """Build an SdRecording from a record descriptor, or None if unusable."""
+    begin = _record_millis(item.get("begin") or item.get("B") or item.get("startTime"))
+    end = _record_millis(item.get("end") or item.get("E") or item.get("stopTime"))
+    if begin is None or end is None or end <= begin:
+        return None
+    rec_type = item.get("type") or item.get("Type") or item.get("recordType")
+    return SdRecording(
+        begin_millis=begin,
+        end_millis=end,
+        record_type=_as_int(rec_type),
     )
 
 
@@ -506,6 +616,44 @@ class EzvizCloudApi:
             msg = "no camera playback ticket returned"
             raise CannotConnect(msg)
         return str(ticket)
+
+    async def async_search_records(
+        self,
+        serial: str,
+        channel: int,
+        *,
+        start_millis: int,
+        stop_millis: int,
+        size: int = _DEFAULT_SD_SIZE,
+    ) -> list[SdRecording]:
+        """
+        Return SD-card recording segments within a time window. Requires a login.
+
+        Plain HTTPS against the device record index (no camera wake). The window is
+        given/returned in epoch milliseconds; each segment plays back over the
+        ysproto ``/playback`` path. An empty list means no SD footage in the window.
+        """
+        if not self._session_id or not self._host:
+            raise EzvizStreamApiError(_NOT_LOGGED_IN)
+        query = urlencode(
+            {
+                "deviceSerial": serial,
+                "channelNo": channel,
+                "startTime": _search_time(start_millis),
+                "stopTime": _search_time(stop_millis),
+                "size": size,
+                "sortBy": 0,
+                "requireLabel": 0,
+            }
+        )
+        body = await self._get(f"{self._host}{_SD_RECORDS_PATH}?{query}")
+        if (body.get("meta") or {}).get("code") != _HTTP_OK:
+            return []
+        return [
+            recording
+            for item in _decode_record_list(body)
+            if isinstance(item, dict) and (recording := _sd_recording(item))
+        ]
 
     async def _async_auth_addr(self) -> str:
         """Resolve (and cache) the auth-node host for token requests."""

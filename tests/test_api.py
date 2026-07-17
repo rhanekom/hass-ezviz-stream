@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import zlib
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -526,3 +527,58 @@ async def test_request_rejects_non_dict_payload() -> None:
     api = EzvizCloudApi(session)
     with pytest.raises(CannotConnect):
         await api._get("https://x")
+
+
+# --- SD-card recordings (records search + playback control plane) ----------- #
+_SD_RECORDS = {
+    "meta": {"code": 200},
+    "records": [
+        {"begin": "2026-07-17 10:35:48", "end": "2026-07-17 10:36:05", "type": 1},
+        {"begin": 1752748800000, "end": 1752748860000},  # epoch ms
+    ],
+}
+
+
+def test_search_time_is_utc_datetime_string() -> None:
+    assert api_module._search_time(0) == "1970-01-01 00:00:00"
+
+
+def test_record_millis_accepts_datetime_epoch_and_junk() -> None:
+    assert api_module._record_millis("2026-07-17 10:35:48") is not None
+    assert api_module._record_millis(1752748800000) == 1752748800000  # epoch ms as-is
+    assert api_module._record_millis(1752748800) == 1752748800000  # epoch s -> ms
+    assert api_module._record_millis("not-a-time") is None
+    assert api_module._record_millis(None) is None
+
+
+async def test_search_records_parses_segments() -> None:
+    api = await _logged_in({"streaming/v2/records": _SD_RECORDS})
+    recs = await api.async_search_records("SN1", 1, start_millis=0, stop_millis=1)
+    assert len(recs) == 2
+    first = recs[0]
+    assert first.begin_cas == "20260717T103548Z"  # round-trips via _cas_time
+    assert first.end_cas == "20260717T103605Z"
+    assert first.duration_ms == 17000
+    assert first.record_type == 1
+
+
+async def test_search_records_decodes_compressed_payload() -> None:
+    recs = [{"begin": "2026-07-17 10:00:00", "end": "2026-07-17 10:00:10"}]
+    blob = base64.b64encode(zlib.compress(json.dumps(recs).encode())).decode()
+    api = await _logged_in(
+        {"streaming/v2/records": {"meta": {"code": 200}, "records": blob}}
+    )
+    out = await api.async_search_records("SN1", 1, start_millis=0, stop_millis=1)
+    assert len(out) == 1
+    assert out[0].begin_cas == "20260717T100000Z"
+
+
+async def test_search_records_empty_on_device_exception() -> None:
+    api = await _logged_in({"streaming/v2/records": {"meta": {"code": 2004}}})
+    assert await api.async_search_records("SN1", 1, start_millis=0, stop_millis=1) == []
+
+
+async def test_search_records_requires_login() -> None:
+    api = EzvizCloudApi(_session({}))
+    with pytest.raises(EzvizStreamApiError):
+        await api.async_search_records("SN1", 1, start_millis=0, stop_millis=1)

@@ -133,9 +133,19 @@ async def _open_connection(
 
 
 async def open_stream(
-    camera: EzvizCamera, token: str, *, stream: int
+    camera: EzvizCamera,
+    token: str,
+    *,
+    stream: int,
+    time_range: tuple[str, str] | None = None,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, str | None]:
-    """Do the VTM/VTDU handshake; return the live VTDU (reader, writer, streamssn)."""
+    """
+    Do the VTM/VTDU handshake; return the VTDU (reader, writer, streamssn).
+
+    With ``time_range`` (``(begin, end)`` CAS timestamps) this requests SD-card
+    playback (``/playback``) instead of the live stream; the handshake is otherwise
+    identical (reference: scripts/in/EzViz_Capture_Replay_SD.pcapng).
+    """
     if not camera.vtm_ip or not camera.vtm_port:
         msg = f"camera {camera.serial} has no VTM routing"
         raise StreamError(msg)
@@ -151,6 +161,7 @@ async def open_stream(
         stream=stream,
         biz=camera.biz,
         timestamp_ms=int(time.time() * 1000),
+        time_range=time_range,
     )
     try:
         fields = await _streaminfo_exchange(vtm_reader, vtm_writer, vtm_url, None)
@@ -654,6 +665,69 @@ async def iter_ps_decrypted(  # noqa: PLR0912, PLR0915 - reconnect loop + tracin
         failures = 0 if produced else failures + 1  # a productive session resets it
         last_end = loop.time()
         await asyncio.sleep(_RETRY_BACKOFF)
+
+
+async def iter_playback_ps(  # noqa: PLR0913 - camera, token, tuning + the time range
+    camera: EzvizCamera,
+    token_factory: Callable[[], Awaitable[str]],
+    *,
+    stream: int,
+    verification_code: str,
+    begin_cas: str,
+    end_cas: str,
+) -> AsyncIterator[bytes]:
+    """
+    Yield decrypted MPEG-PS for one SD-card recording segment ``[begin, end]``.
+
+    A single **finite** ysproto ``/playback`` session (reference:
+    scripts/in/EzViz_Capture_Replay_SD.pcapng): opens once, streams until the segment
+    ends (the VTDU closes the session) and decrypts on the fly like
+    :func:`iter_ps_decrypted`. Unlike live it does NOT reconnect - a closed session
+    means the clip finished, so the generator ends.
+    """
+    loop = asyncio.get_running_loop()
+    token = await token_factory()
+    try:
+        reader, writer, stream_ssn = await open_stream(
+            camera, token, stream=stream, time_range=(begin_cas, end_cas)
+        )
+    except StreamError as err:
+        _LOGGER.debug("SD playback handshake failed for %s: %s", camera.serial, err)
+        return
+
+    frames = _FrameReader(reader)
+    last_ka = loop.time()
+    ka_seq = 1
+    decryptor = StreamingPsDecryptor(verification_code) if verification_code else None
+    try:
+        while True:
+            if stream_ssn and loop.time() - last_ka >= _KEEPALIVE_INTERVAL:
+                writer.write(build_keepalive(stream_ssn, seq=ka_seq))
+                await writer.drain()
+                ka_seq += 1
+                last_ka = loop.time()
+            frame = await frames.next_frame(loop.time() + _READ_SLICE)
+            if frame is None:
+                if frames.closed:
+                    break  # segment finished; the VTDU closed the session
+                continue
+            channel, _msgcode, body = frame
+            if channel != CH_STREAM or not body:
+                continue
+            if decryptor is not None:
+                chunk = await asyncio.to_thread(decryptor.feed, body)
+            else:
+                chunk = body
+            if chunk:
+                yield chunk
+        if decryptor is not None:
+            tail = await asyncio.to_thread(decryptor.flush)
+            if tail:
+                yield tail
+    finally:
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
 
 
 async def stream_annexb(

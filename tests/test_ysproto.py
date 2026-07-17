@@ -93,6 +93,29 @@ def test_build_stream_url_timestamp() -> None:
     assert "&timestamp=1700000000000" in url
 
 
+def test_build_stream_url_live_has_no_playback_range() -> None:
+    url = ysproto.build_stream_url("1.2.3.4", 6001, "SN1", 1, "tok")
+    assert "/live?" in url
+    assert "begin=" not in url
+
+
+def test_build_stream_url_playback() -> None:
+    url = ysproto.build_stream_url(
+        "1.2.3.4",
+        8554,
+        "SN1",
+        1,
+        "tok",
+        stream=2,
+        time_range=("20260717T103548Z", "20260717T103605Z"),
+    )
+    assert "/playback?" in url
+    assert "begin=20260717T103548Z" in url
+    assert "end=20260717T103605Z" in url
+    assert "stream=2" in url
+    assert "ssn=tok" in url
+
+
 # --- HEVC de-packetiser ----------------------------------------------------- #
 def test_depacketize_single_nal() -> None:
     depacketizer = ysproto.HevcDepacketizer()
