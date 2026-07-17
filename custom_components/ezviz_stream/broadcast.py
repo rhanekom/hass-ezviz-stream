@@ -138,18 +138,20 @@ async def mpegts_source(  # noqa: PLR0913 - one live source needs api, camera + 
 
 
 async def mp4_replay_source(
-    ffmpeg_bin: str, ps_source: AsyncIterator[bytes]
+    ffmpeg_bin: str, ps_source: AsyncIterator[bytes], *, audio: bool = False
 ) -> AsyncIterator[bytes]:
     """
-    Transcode a decrypted cloud-replay MPEG-PS clip to fragmented H.264 MP4.
+    Transcode a decrypted recording MPEG-PS clip to fragmented H.264 MP4.
 
-    ``ps_source`` is the decrypted MPEG-PS from
-    :func:`cloud_replay.iter_cloud_replay_ps`. ffmpeg re-encodes the video HEVC->H.264
-    (browser-universal) into a fragmented MP4 that streams progressively to a browser
-    ``<video>``. Audio is dropped for now - the cloud clip's AAC does not decode
-    cleanly yet (a separate follow-up); video is the deliverable. Runs until
-    ``ps_source`` is exhausted; ffmpeg is torn down on exit.
+    ``ps_source`` is the decrypted MPEG-PS from a cloud
+    (:func:`cloud_replay.iter_cloud_replay_ps`) or SD (:func:`stream.iter_playback_ps`)
+    recording. ffmpeg re-encodes the video HEVC->H.264 (browser-universal) into a
+    fragmented MP4 that streams progressively to a browser ``<video>``. ``audio``
+    re-encodes the clip's AAC track (only correct on an unencrypted camera - an
+    encrypted clip's audio payload is not yet decryptable, so it is dropped there).
+    Runs until ``ps_source`` is exhausted; ffmpeg is torn down on exit.
     """
+    audio_args = ["-c:a", "aac"] if audio else ["-an"]
     ffmpeg = await asyncio.create_subprocess_exec(
         ffmpeg_bin,
         "-hide_banner",
@@ -167,7 +169,7 @@ async def mp4_replay_source(
         "zerolatency",
         "-pix_fmt",
         "yuv420p",
-        "-an",  # audio dropped pending the cloud-clip AAC follow-up
+        *audio_args,
         "-movflags",
         "frag_keyframe+empty_moov+default_base_moof",
         "-f",

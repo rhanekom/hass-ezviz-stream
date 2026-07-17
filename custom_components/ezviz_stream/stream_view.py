@@ -213,7 +213,10 @@ class EzvizReplayView(HomeAssistantView):
             verification_code=entry.verification_code if rec.crypt else "",
             file_size=rec.file_size,
         )
-        return mp4_replay_source(get_ffmpeg_manager(self.hass).binary, ps_source)
+        # Audio decrypts only on an unencrypted clip; encrypted-clip AAC is dropped.
+        return mp4_replay_source(
+            get_ffmpeg_manager(self.hass).binary, ps_source, audio=not rec.crypt
+        )
 
     def _sd_source(
         self, entry: _Stream, camera: EzvizCamera, ident: str
@@ -231,4 +234,8 @@ class EzvizReplayView(HomeAssistantView):
             begin_cas=segment.begin_cas,
             end_cas=segment.end_cas,
         )
-        return mp4_replay_source(get_ffmpeg_manager(self.hass).binary, ps_source)
+        return mp4_replay_source(
+            get_ffmpeg_manager(self.hass).binary,
+            ps_source,
+            audio=not camera.is_encrypted,
+        )
