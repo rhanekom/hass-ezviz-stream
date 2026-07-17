@@ -122,8 +122,6 @@ lacks. No runtime `pyezvizapi` (port behaviour into `api.py`, as with auth/decry
       encryption-off/on pair) and bit-diff the audio transform for the cloud path.
 - [ ] MFA / SMS verification-code login (a differentiator; `Bobsilvio/ezviz_hp7`
       shows the approach works). 2FA fast-follow.
-- [ ] Multi-camera niceties; pre-fill the camera picker from existing `ezviz`
-      devices (§6.3).
 - [ ] **MJPEG serving mode - compatibility fallback only.** Opt-in path that decodes
       to JPEG server-side (no go2rtc/WebRTC, no HEVC-in-browser), via a `mjpeg_source`
       sibling of `broadcast.mpegts_source` through the existing `CameraBroadcast`.
