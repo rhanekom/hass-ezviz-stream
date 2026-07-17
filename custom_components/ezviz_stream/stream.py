@@ -698,7 +698,11 @@ async def iter_playback_ps(  # noqa: PLR0913 - camera, token, tuning + the time 
     frames = _FrameReader(reader)
     last_ka = loop.time()
     ka_seq = 1
-    decryptor = StreamingPsDecryptor(verification_code) if verification_code else None
+    decryptor = (
+        StreamingPsDecryptor(verification_code, decrypt_audio=True)
+        if verification_code
+        else None
+    )
     try:
         while True:
             if stream_ssn and loop.time() - last_ka >= _KEEPALIVE_INTERVAL:

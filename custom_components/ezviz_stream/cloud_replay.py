@@ -359,7 +359,9 @@ async def iter_cloud_replay_ps(  # noqa: PLR0913 - the open request needs the de
 
     def worker() -> None:
         decryptor = (
-            StreamingPsDecryptor(verification_code) if verification_code else None
+            StreamingPsDecryptor(verification_code, decrypt_audio=True)
+            if verification_code
+            else None
         )
 
         def on_media(chunk: bytes) -> None:
