@@ -27,17 +27,18 @@ from homeassistant.components.ffmpeg import get_ffmpeg_manager
 # without an explicit __all__ entry, which mypy's no_implicit_reexport rejects.
 from homeassistant.helpers.http import HomeAssistantView
 
-from .api import EzvizStreamApiError
+from .api import EzvizStreamApiError, SdRecording
 from .broadcast import mp4_replay_source
 from .cloud_replay import iter_cloud_replay_ps
-from .const import DOMAIN
+from .const import DOMAIN, SUB_STREAM
+from .stream import iter_playback_ps
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from homeassistant.core import HomeAssistant
 
-    from .api import EzvizCloudApi
+    from .api import EzvizCamera, EzvizCloudApi
     from .broadcast import CameraBroadcast
 
 _LOGGER = logging.getLogger(__name__)
@@ -130,7 +131,7 @@ class EzvizReplayView(HomeAssistantView):
     decryptor, and transcodes it to a browser-playable fragmented MP4.
     """
 
-    url = "/api/ezviz_stream/{serial}/replay/{seq_id}"
+    url = "/api/ezviz_stream/{serial}/replay/{kind}/{ident}"
     name = "api:ezviz_stream:replay"
     requires_auth = False  # the per-camera token in the query guards it instead
 
@@ -139,9 +140,9 @@ class EzvizReplayView(HomeAssistantView):
         self.hass = hass
 
     async def get(
-        self, request: web.Request, serial: str, seq_id: str
+        self, request: web.Request, serial: str, kind: str, ident: str
     ) -> web.StreamResponse:
-        """Stream ``seq_id`` of ``serial`` as fragmented MP4 while the client stays."""
+        """Stream a cloud (``kind=cloud``) or SD (``kind=sd``) clip as fMP4."""
         entry = _registry(self.hass).get(serial)
         token = request.query.get("token", "")
         # One response for every failure mode so a caller can't probe valid ids.
@@ -149,9 +150,17 @@ class EzvizReplayView(HomeAssistantView):
             raise web.HTTPNotFound
 
         try:
-            source = await self._replay_source(entry, serial, seq_id)
+            camera = await self._camera(entry, serial)
+            if camera is None:
+                raise web.HTTPNotFound
+            if kind == "cloud":
+                source = await self._cloud_source(entry, camera, ident)
+            elif kind == "sd":
+                source = self._sd_source(entry, camera, ident)
+            else:
+                raise web.HTTPNotFound
         except EzvizStreamApiError as err:
-            _LOGGER.debug("replay %s/%s setup failed: %s", serial, seq_id, err)
+            _LOGGER.debug("replay %s/%s/%s setup failed: %s", serial, kind, ident, err)
             raise web.HTTPNotFound from err
         if source is None:
             raise web.HTTPNotFound
@@ -166,15 +175,16 @@ class EzvizReplayView(HomeAssistantView):
             pass
         return response
 
-    async def _replay_source(
-        self, entry: _Stream, serial: str, seq_id: str
-    ) -> AsyncIterator[bytes] | None:
-        """Resolve the clip + ticket and return the transcoded MP4 byte stream."""
+    async def _camera(self, entry: _Stream, serial: str) -> EzvizCamera | None:
+        """Resolve the live camera descriptor for ``serial`` (VTM routing + channel)."""
         cameras = await entry.api.async_get_cameras()
-        camera = next((c for c in cameras if c.serial == serial), None)
-        if camera is None:
-            return None
-        videos = await entry.api.async_get_cloud_videos(serial, camera.channel)
+        return next((c for c in cameras if c.serial == serial), None)
+
+    async def _cloud_source(
+        self, entry: _Stream, camera: EzvizCamera, seq_id: str
+    ) -> AsyncIterator[bytes] | None:
+        """Transcoded MP4 for a cloud recording via the cloud-replay socket."""
+        videos = await entry.api.async_get_cloud_videos(camera.serial, camera.channel)
         rec = next(
             (
                 v
@@ -190,11 +200,11 @@ class EzvizReplayView(HomeAssistantView):
             return None
         if rec.end_cas is None:
             return None
-        ticket = await entry.api.async_get_camera_ticket(serial, camera.channel)
+        ticket = await entry.api.async_get_camera_ticket(camera.serial, camera.channel)
         ps_source = iter_cloud_replay_ps(
             stream_url=rec.stream_url,
             ticket=ticket,
-            serial=serial,
+            serial=camera.serial,
             channel=camera.channel,
             seq_id=rec.seq_id,
             begin_cas=rec.begin_cas,
@@ -203,5 +213,22 @@ class EzvizReplayView(HomeAssistantView):
             verification_code=entry.verification_code if rec.crypt else "",
             file_size=rec.file_size,
         )
-        ffmpeg_bin = get_ffmpeg_manager(self.hass).binary
-        return mp4_replay_source(ffmpeg_bin, ps_source)
+        return mp4_replay_source(get_ffmpeg_manager(self.hass).binary, ps_source)
+
+    def _sd_source(
+        self, entry: _Stream, camera: EzvizCamera, ident: str
+    ) -> AsyncIterator[bytes] | None:
+        """Transcoded MP4 for an SD segment (``ident`` = ``begin_ms-end_ms``)."""
+        begin_ms, _, end_ms = ident.partition("-")
+        if not begin_ms.isdigit() or not end_ms.isdigit():
+            return None
+        segment = SdRecording(int(begin_ms), int(end_ms), None)
+        ps_source = iter_playback_ps(
+            camera,
+            entry.api.async_get_vtdu_token,
+            stream=SUB_STREAM,
+            verification_code=entry.verification_code if camera.is_encrypted else "",
+            begin_cas=segment.begin_cas,
+            end_cas=segment.end_cas,
+        )
+        return mp4_replay_source(get_ffmpeg_manager(self.hass).binary, ps_source)

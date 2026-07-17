@@ -12,6 +12,7 @@ The official ``ezviz`` integration has no recordings/playback, so this is net-ad
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 # Import from the defining module: media_player re-exports these without an
@@ -46,6 +47,13 @@ if TYPE_CHECKING:
     from .api import EzvizCloudApi
 
 _MIME_TYPE = "video/mp4"
+_KIND_CLOUD = "cloud"
+_KIND_SD = "sd"
+_SD_SEARCH_HOURS = 24  # how far back to list SD-card segments
+_SD_CLOCK_MARGIN_MS = 3_600_000  # extend past "now": camera clocks can run ahead
+# media_content_id depths: serial / kind / id
+_ID_DEPTH_KIND = 2
+_ID_DEPTH_CLIP = 3
 
 
 async def async_get_media_source(hass: HomeAssistant) -> MediaSource:
@@ -64,57 +72,137 @@ class EzvizRecordingsMediaSource(MediaSource):
         self.hass = hass
 
     async def async_resolve_media(self, item: MediaSourceItem) -> PlayMedia:
-        """Resolve a ``serial/seq_id`` clip to the token-guarded replay URL."""
-        serial, _, seq_id = item.identifier.partition("/")
-        if not serial or not seq_id:
+        """Resolve a ``serial/kind/id`` clip to the token-guarded replay URL."""
+        parts = item.identifier.split("/")
+        if len(parts) != _ID_DEPTH_CLIP or parts[1] not in (_KIND_CLOUD, _KIND_SD):
             msg = f"Invalid EZVIZ recording id: {item.identifier!r}"
             raise Unresolvable(msg)
+        serial, kind, ident = parts
         token = replay_token(self.hass, serial)
         if token is None:
             msg = f"Camera {serial} is not available for playback"
             raise Unresolvable(msg)
-        url = f"/api/ezviz_stream/{serial}/replay/{seq_id}?token={token}"
+        url = f"/api/ezviz_stream/{serial}/replay/{kind}/{ident}?token={token}"
         return PlayMedia(url, _MIME_TYPE)
 
     async def async_browse_media(self, item: MediaSourceItem) -> BrowseMediaSource:
-        """Browse cameras (root) or one camera's recordings."""
+        """Browse cameras (root), a camera's sources, or a source's recordings."""
         if not item.identifier:
             return self._browse_root()
-        serial, _, seq_id = item.identifier.partition("/")
-        if seq_id:  # a clip is a leaf, not browsable
-            msg = f"{item.identifier!r} is a recording, not a folder"
-            raise Unresolvable(msg)
-        return await self._browse_camera(serial)
+        parts = item.identifier.split("/")
+        if len(parts) == 1:
+            return self._browse_camera(parts[0])
+        if len(parts) == _ID_DEPTH_KIND and parts[1] == _KIND_CLOUD:
+            return await self._browse_cloud(parts[0])
+        if len(parts) == _ID_DEPTH_KIND and parts[1] == _KIND_SD:
+            return await self._browse_sd(parts[0])
+        msg = f"{item.identifier!r} is not a browsable folder"
+        raise Unresolvable(msg)
+
+    def _folder(
+        self,
+        identifier: str | None,
+        title: str,
+        *,
+        children: list[BrowseMediaSource] | None = None,
+        children_class: MediaClass = MediaClass.VIDEO,
+    ) -> BrowseMediaSource:
+        """Build a browsable directory node."""
+        return BrowseMediaSource(
+            domain=DOMAIN,
+            identifier=identifier,
+            media_class=MediaClass.DIRECTORY,
+            media_content_type=MediaType.VIDEO,
+            title=title,
+            can_play=False,
+            can_expand=True,
+            children_media_class=children_class,
+            children=children or [],
+        )
+
+    def _clip(self, identifier: str, title: str) -> BrowseMediaSource:
+        """Build a playable recording leaf."""
+        return BrowseMediaSource(
+            domain=DOMAIN,
+            identifier=identifier,
+            media_class=MediaClass.VIDEO,
+            media_content_type=MediaType.VIDEO,
+            title=title,
+            can_play=True,
+            can_expand=False,
+        )
 
     def _browse_root(self) -> BrowseMediaSource:
         """List every configured, loaded camera as a folder."""
-        children = [
-            BrowseMediaSource(
-                domain=DOMAIN,
-                identifier=serial,
-                media_class=MediaClass.DIRECTORY,
-                media_content_type=MediaType.VIDEO,
-                title=title,
-                can_play=False,
-                can_expand=True,
-                children_media_class=MediaClass.VIDEO,
-            )
+        cameras = [
+            self._folder(serial, title, children_class=MediaClass.DIRECTORY)
             for _entry, serial, title in self._cameras()
         ]
-        return BrowseMediaSource(
-            domain=DOMAIN,
-            identifier=None,
-            media_class=MediaClass.DIRECTORY,
-            media_content_type=MediaType.VIDEO,
-            title="EZVIZ Recordings",
-            can_play=False,
-            can_expand=True,
-            children_media_class=MediaClass.DIRECTORY,
-            children=children,
+        return self._folder(
+            None,
+            "EZVIZ Recordings",
+            children=cameras,
+            children_class=MediaClass.DIRECTORY,
         )
 
-    async def _browse_camera(self, serial: str) -> BrowseMediaSource:
-        """List one camera's cloud recordings, newest first."""
+    def _browse_camera(self, serial: str) -> BrowseMediaSource:
+        """Show a camera's two recording sources: cloud and SD-card."""
+        title = self._camera_title(serial)
+        return self._folder(
+            serial,
+            title,
+            children_class=MediaClass.DIRECTORY,
+            children=[
+                self._folder(f"{serial}/{_KIND_CLOUD}", "Cloud recordings"),
+                self._folder(f"{serial}/{_KIND_SD}", "SD-card recordings"),
+            ],
+        )
+
+    async def _browse_cloud(self, serial: str) -> BrowseMediaSource:
+        """List a camera's cloud recordings, newest first."""
+        api, channel, title = await self._camera_context(serial)
+        recordings = await api.async_get_cloud_videos(serial, channel)
+        clips = [
+            self._clip(
+                f"{serial}/{_KIND_CLOUD}/{rec.seq_id}",
+                rec.start_time or rec.begin_cas or rec.seq_id,
+            )
+            for rec in recordings
+        ]
+        return self._folder(
+            f"{serial}/{_KIND_CLOUD}", f"{title} - Cloud", children=clips
+        )
+
+    async def _browse_sd(self, serial: str) -> BrowseMediaSource:
+        """List a camera's SD-card segments over the recent window."""
+        api, channel, title = await self._camera_context(serial)
+        now_ms = int(time.time() * 1000)
+        recordings = await api.async_search_records(
+            serial,
+            channel,
+            start_millis=now_ms - _SD_SEARCH_HOURS * 3_600_000,
+            stop_millis=now_ms + _SD_CLOCK_MARGIN_MS,
+        )
+        clips = [
+            self._clip(
+                f"{serial}/{_KIND_SD}/{rec.begin_millis}-{rec.end_millis}", rec.label
+            )
+            for rec in recordings
+        ]
+        return self._folder(
+            f"{serial}/{_KIND_SD}", f"{title} - SD card", children=clips
+        )
+
+    def _camera_title(self, serial: str) -> str:
+        """Return a camera's title, or raise if it is unknown / not exposed."""
+        match = next((c for c in self._cameras() if c[1] == serial), None)
+        if match is None:
+            msg = f"Unknown camera {serial}"
+            raise Unresolvable(msg)
+        return match[2]
+
+    async def _camera_context(self, serial: str) -> tuple[EzvizCloudApi, int, str]:
+        """Return (api, channel, title) for a serial, resolving the channel live."""
         match = next((c for c in self._cameras() if c[1] == serial), None)
         if match is None:
             msg = f"Unknown camera {serial}"
@@ -125,30 +213,7 @@ class EzvizRecordingsMediaSource(MediaSource):
             (c for c in await api.async_get_cameras() if c.serial == serial), None
         )
         channel = camera.channel if camera is not None else 1
-        recordings = await api.async_get_cloud_videos(serial, channel)
-        children = [
-            BrowseMediaSource(
-                domain=DOMAIN,
-                identifier=f"{serial}/{rec.seq_id}",
-                media_class=MediaClass.VIDEO,
-                media_content_type=MediaType.VIDEO,
-                title=rec.start_time or rec.begin_cas or rec.seq_id,
-                can_play=True,
-                can_expand=False,
-            )
-            for rec in recordings
-        ]
-        return BrowseMediaSource(
-            domain=DOMAIN,
-            identifier=serial,
-            media_class=MediaClass.DIRECTORY,
-            media_content_type=MediaType.VIDEO,
-            title=title,
-            can_play=False,
-            can_expand=True,
-            children_media_class=MediaClass.VIDEO,
-            children=children,
-        )
+        return api, channel, title
 
     def _cameras(self) -> list[tuple[EzvizStreamConfigEntry, str, str]]:
         """Return (entry, serial, title) for every camera of every loaded account."""

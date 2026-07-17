@@ -218,6 +218,11 @@ class SdRecording:
         """Segment length in milliseconds."""
         return max(0, self.end_millis - self.begin_millis)
 
+    @property
+    def label(self) -> str:
+        """A readable UTC start time for a media-browser title."""
+        return _search_time(self.begin_millis)
+
 
 def _search_time(millis: int) -> str:
     """Format epoch milliseconds as the UTC datetime string the record search wants."""

@@ -10,7 +10,11 @@ import pytest
 from homeassistant.components.media_source import MediaSourceItem, Unresolvable
 from homeassistant.config_entries import ConfigEntryState
 
-from custom_components.ezviz_stream.api import CloudRecording, EzvizCamera
+from custom_components.ezviz_stream.api import (
+    CloudRecording,
+    EzvizCamera,
+    SdRecording,
+)
 from custom_components.ezviz_stream.const import (
     CAMERA_SUBENTRY_TYPE,
     CONF_ENABLE_RECORDINGS,
@@ -53,6 +57,9 @@ def _fake_hass_with_camera() -> tuple[MagicMock, AsyncMock]:
     api = MagicMock()
     api.async_get_cameras = AsyncMock(return_value=[_CAMERA])
     api.async_get_cloud_videos = AsyncMock(return_value=[_RECORDING])
+    api.async_search_records = AsyncMock(
+        return_value=[SdRecording(1752748800000, 1752748860000, 1)]
+    )
 
     subentry = SimpleNamespace(
         subentry_type=CAMERA_SUBENTRY_TYPE,
@@ -126,17 +133,36 @@ async def test_camera_override_off_hides_despite_account_on() -> None:
     assert root.children == []
 
 
-async def test_browse_camera_lists_recordings() -> None:
-    hass, api = _fake_hass_with_camera()
+async def test_browse_camera_shows_cloud_and_sd_folders() -> None:
+    hass, _api = _fake_hass_with_camera()
     source = EzvizRecordingsMediaSource(hass)
     node = await source.async_browse_media(_item(hass, "SN1"))
+    assert node.children is not None
+    assert [c.identifier for c in node.children] == ["SN1/cloud", "SN1/sd"]
+    assert all(c.can_expand and not c.can_play for c in node.children)
+
+
+async def test_browse_cloud_lists_recordings() -> None:
+    hass, api = _fake_hass_with_camera()
+    source = EzvizRecordingsMediaSource(hass)
+    node = await source.async_browse_media(_item(hass, "SN1/cloud"))
     api.async_get_cloud_videos.assert_awaited_once_with("SN1", 1)
     assert node.children is not None
-    assert len(node.children) == 1
     clip = node.children[0]
-    assert clip.identifier == "SN1/SEQ1"
+    assert clip.identifier == "SN1/cloud/SEQ1"
     assert clip.can_play
     assert not clip.can_expand
+
+
+async def test_browse_sd_lists_segments() -> None:
+    hass, api = _fake_hass_with_camera()
+    source = EzvizRecordingsMediaSource(hass)
+    node = await source.async_browse_media(_item(hass, "SN1/sd"))
+    assert api.async_search_records.await_count == 1
+    assert node.children is not None
+    clip = node.children[0]
+    assert clip.identifier == "SN1/sd/1752748800000-1752748860000"
+    assert clip.can_play
 
 
 async def test_browse_unknown_camera_raises() -> None:
@@ -146,27 +172,35 @@ async def test_browse_unknown_camera_raises() -> None:
         await source.async_browse_media(_item(hass, "NOPE"))
 
 
-async def test_browse_clip_is_not_a_folder() -> None:
+async def test_browse_unknown_kind_is_not_a_folder() -> None:
     hass, _api = _fake_hass_with_camera()
     source = EzvizRecordingsMediaSource(hass)
     with pytest.raises(Unresolvable):
-        await source.async_browse_media(_item(hass, "SN1/SEQ1"))
+        await source.async_browse_media(_item(hass, "SN1/bogus"))
 
 
 async def test_resolve_builds_token_guarded_url() -> None:
     hass, api = _fake_hass_with_camera()
     register_stream(hass, "SN1", "TOK", MagicMock(), api, "123456")
     source = EzvizRecordingsMediaSource(hass)
-    media = await source.async_resolve_media(_item(hass, "SN1/SEQ1"))
+    media = await source.async_resolve_media(_item(hass, "SN1/cloud/SEQ1"))
     assert media.mime_type == "video/mp4"
-    assert media.url == "/api/ezviz_stream/SN1/replay/SEQ1?token=TOK"
+    assert media.url == "/api/ezviz_stream/SN1/replay/cloud/SEQ1?token=TOK"
+
+
+async def test_resolve_sd_builds_url() -> None:
+    hass, api = _fake_hass_with_camera()
+    register_stream(hass, "SN1", "TOK", MagicMock(), api, "")
+    source = EzvizRecordingsMediaSource(hass)
+    media = await source.async_resolve_media(_item(hass, "SN1/sd/100-200"))
+    assert media.url == "/api/ezviz_stream/SN1/replay/sd/100-200?token=TOK"
 
 
 async def test_resolve_without_registered_camera_raises() -> None:
     hass, _api = _fake_hass_with_camera()  # nothing registered in the stream registry
     source = EzvizRecordingsMediaSource(hass)
     with pytest.raises(Unresolvable):
-        await source.async_resolve_media(_item(hass, "SN1/SEQ1"))
+        await source.async_resolve_media(_item(hass, "SN1/cloud/SEQ1"))
 
 
 async def test_resolve_bad_identifier_raises() -> None:
