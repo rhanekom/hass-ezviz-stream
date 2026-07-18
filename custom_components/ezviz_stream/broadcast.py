@@ -32,6 +32,14 @@ _LOGGER = logging.getLogger(__name__)
 _TS_READ = 65536  # bytes per read from FFmpeg's MPEG-TS output
 _QUEUE_MAX = 512  # per-subscriber backlog; a slow consumer drops its oldest chunks
 _FFMPEG_TERM_TIMEOUT = 5.0
+# After a session that produced no media (camera offline/unreachable, DNS/cloud error),
+# refuse to start a new one for this long. HA's stream component re-pulls our view URL
+# on a backoff for as long as a consumer is attached, even for a camera that cannot
+# stream; without this each re-pull would re-run a full cloud handshake storm. A
+# productive session clears it, so a camera coming back online recovers on the next
+# pull once the window passes. Battery cams are covered too: a wake attempt runs the
+# full bounded reconnect first, and only a session that woke nothing trips the cooldown.
+_OFFLINE_COOLDOWN = 120.0
 # Playback pacing (see _Pacer): the RTP timestamp is a 90 kHz clock; a step that is
 # negative or larger than this (2 s) means a discontinuity - a reconnect's fresh RTP
 # base or a 32-bit wrap - so we rebase the schedule to "now" instead of replaying it.
@@ -499,6 +507,10 @@ async def _terminate(ffmpeg: asyncio.subprocess.Process) -> None:
     if ffmpeg.returncode is None:
         with contextlib.suppress(ProcessLookupError):
             ffmpeg.kill()
+        # Reap after the kill so the subprocess transport is closed on this loop;
+        # left unreaped, its __del__ can run off-loop under GC and raise on 3.14.
+        with contextlib.suppress(Exception):
+            await ffmpeg.wait()
 
 
 class CameraBroadcast:
@@ -510,6 +522,7 @@ class CameraBroadcast:
         self._subscribers: set[asyncio.Queue[bytes | None]] = set()
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        self._offline_until = 0.0  # monotonic deadline; see _OFFLINE_COOLDOWN
 
     @property
     def is_running(self) -> bool:
@@ -527,8 +540,14 @@ class CameraBroadcast:
         """
         queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=_QUEUE_MAX)
         async with self._lock:
-            if not self.is_running and not start_if_idle:
-                return  # nothing is streaming; do not start a session just to tap it
+            if not self.is_running:
+                if not start_if_idle:
+                    return  # nothing is streaming; do not start a session to tap it
+                if asyncio.get_running_loop().time() < self._offline_until:
+                    # Recently gave up on a camera that streamed nothing; do not open
+                    # another cloud session until the cooldown passes (see _run).
+                    _LOGGER.debug("offline cooldown active; not starting a session")
+                    return
             self._subscribers.add(queue)
             if self._task is None or self._task.done():
                 self._task = asyncio.create_task(self._run())
@@ -560,15 +579,39 @@ class CameraBroadcast:
 
     async def _run(self) -> None:
         """Pull the upstream source and push each chunk to every subscriber."""
+        source = self._source_factory()
+        produced = False
+        cancelled = False
         try:
-            async for chunk in self._source_factory():
+            async for chunk in source:
+                produced = True
                 for queue in self._subscribers:
                     _offer(queue, chunk)
         except asyncio.CancelledError:
+            cancelled = True
             raise
         except Exception:
             _LOGGER.exception("broadcast upstream for camera failed")
         finally:
+            # Close the source on this loop so its FFmpeg is reaped now (mpegts_source's
+            # own finally -> _terminate) rather than left to GC, whose __del__ can run
+            # off-loop and raise on Python 3.14. The declared type is AsyncIterator (no
+            # aclose); the concrete source is an async generator, so close it when able.
+            aclose = getattr(source, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(Exception):
+                    await aclose()
+            # A session that ended on its own without any media means the camera could
+            # not stream (offline/unreachable/error); hold off new sessions for a while
+            # so HA re-pulling the URL does not restart the handshake storm. A
+            # productive session clears the cooldown; a cancelled one (subscriber left)
+            # is not a failure signal, so it leaves the cooldown untouched.
+            if produced:
+                self._offline_until = 0.0
+            elif not cancelled:
+                self._offline_until = (
+                    asyncio.get_running_loop().time() + _OFFLINE_COOLDOWN
+                )
             for queue in self._subscribers:
                 _offer(queue, None)  # signal end-of-stream to consumers
 

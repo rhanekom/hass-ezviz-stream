@@ -370,6 +370,19 @@ async def test_terminate_escalates_to_kill_on_timeout() -> None:
     proc.kill.assert_called_once()
 
 
+async def test_terminate_reaps_process_after_kill() -> None:
+    """After escalating to kill, the process is awaited so its transport is reaped."""
+    proc = MagicMock()
+    proc.returncode = None  # AsyncMock wait never sets it, so terminate escalates
+    proc.wait = AsyncMock()
+
+    await broadcast._terminate(proc)
+
+    proc.terminate.assert_called_once()
+    proc.kill.assert_called_once()
+    assert proc.wait.await_count >= 2  # graceful wait, then reap after the kill
+
+
 async def test_subscribe_returns_when_upstream_ends() -> None:
     """When the upstream source ends, the subscriber sees the end sentinel and stops."""
 
@@ -398,6 +411,47 @@ async def test_subscribe_start_if_idle_false_taps_only_when_running() -> None:
     assert chunks == []  # nothing was streaming, so nothing to tap
     assert started is False  # the upstream session was never started
     assert caster._task is None
+
+
+async def test_offline_cooldown_skips_restart_after_empty_session() -> None:
+    """A session that streams no media sets a cooldown; the next pull won't restart."""
+    calls = 0
+
+    async def source() -> AsyncIterator[bytes]:
+        nonlocal calls
+        calls += 1
+        return
+        yield  # pragma: no cover - makes this an (empty) async generator
+
+    caster = CameraBroadcast(source)
+    with patch.object(broadcast, "_OFFLINE_COOLDOWN", 1000.0):
+        first = [chunk async for chunk in caster.subscribe()]
+        second = [chunk async for chunk in caster.subscribe()]
+
+    assert first == []
+    assert second == []
+    assert calls == 1  # the cooldown blocked the second session from starting
+    assert caster._offline_until > 0
+
+
+async def test_productive_session_clears_cooldown() -> None:
+    """A session that streams media leaves no cooldown; the next pull restarts."""
+    calls = 0
+
+    async def source() -> AsyncIterator[bytes]:
+        nonlocal calls
+        calls += 1
+        yield b"frame"
+
+    caster = CameraBroadcast(source)
+    with patch.object(broadcast, "_OFFLINE_COOLDOWN", 1000.0):
+        first = [chunk async for chunk in caster.subscribe()]
+        second = [chunk async for chunk in caster.subscribe()]
+
+    assert first == [b"frame"]
+    assert second == [b"frame"]
+    assert calls == 2  # media flowed, so no cooldown - both pulls started a session
+    assert caster._offline_until == 0.0
 
 
 async def test_async_stop_cancels_task_and_releases_subscribers() -> None:
