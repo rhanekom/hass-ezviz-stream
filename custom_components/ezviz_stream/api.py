@@ -11,11 +11,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import datetime as dt
 import hashlib
 import json
 import logging
+import zlib
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, NamedTuple
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import aiohttp
 
@@ -35,6 +39,25 @@ _PAGELIST_PATH = (
 )
 # Most recent motion/alarm event (with its stored still image); limit=1 = latest.
 _ALARM_PATH = "/v3/alarms/v2/advanced?queryType=-1&limit=1&stype=-1&deviceSerials="
+
+# Cloud recordings (playback): list stored clips, then fetch a per-clip playback
+# ticket. The clip bytes themselves come over the cloud-replay socket (streaming
+# module), not here - this is just the control plane (doc/reference.md, recordings).
+_CLOUD_VIDEOS_PATH = "/v3/clouds/videos/list"
+_CAMERA_TICKET_PATH = "/v3/cameras/ticketInfo"
+_DEFAULT_CLOUD_LIMIT = 20
+_CLOUD_VIDEO_TYPE = 2  # 2 = event/motion clips (the EZVIZ app default)
+_DEFAULT_STORAGE_VERSION = 2
+_CAS_TIME_FORMAT = "%Y%m%dT%H%M%SZ"  # EZVIZ "CAS" playback time (UTC), reference
+
+# SD-card recordings: search the on-device record index over a time window. The
+# clip bytes come over the ysproto /playback path (streaming module), not here.
+_SD_RECORDS_PATH = "/v3/streaming/v2/records"
+_DEFAULT_SD_SIZE = 20
+_EPOCH_MS_DIGITS = 13  # a 13-digit integer string is epoch milliseconds
+# The record search wants UTC "YYYY-MM-DD HH:MM:SS" strings; epoch/CAS give a device
+# exception (2004). Verified live against a real camera.
+_SEARCH_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # Desktop/Studio client persona - load-bearing: the mobile persona doesn't reliably
 # surface VTM routing data (doc/reference.md A.1/A.2).
@@ -118,6 +141,160 @@ class EzvizCamera:
         return f"{self.name} ({self.serial})" if self.name else self.serial
 
 
+@dataclass(slots=True)
+class CloudRecording:
+    """
+    A cloud-stored clip discovered for a camera, with the fields playback needs.
+
+    ``start_millis`` is the clip start as epoch milliseconds (None when the
+    descriptor carried no parseable time); ``begin_cas``/``end_cas`` are the same
+    range formatted for the cloud-replay open request. ``crypt`` marks a clip whose
+    bytes are AES-encrypted (decrypted with the camera verification code, like the
+    live IPC transport).
+    """
+
+    seq_id: str
+    start_time: str  # raw descriptor string, e.g. "2026-07-16 10:30:00" (UTC)
+    stop_time: str
+    start_millis: int | None
+    video_long: int  # clip duration in milliseconds
+    file_size: int | None
+    storage_version: int
+    crypt: bool
+    key_checksum: str
+    stream_url: str | None  # "host:port" of the cloud-replay server, when present
+
+    @property
+    def stop_millis(self) -> int | None:
+        """Clip end as epoch milliseconds (start + duration), or None if unknown."""
+        if self.start_millis is None:
+            return None
+        return self.start_millis + self.video_long
+
+    @property
+    def begin_cas(self) -> str | None:
+        """Clip start formatted as an EZVIZ CAS timestamp, or None if unknown."""
+        return None if self.start_millis is None else _cas_time(self.start_millis)
+
+    @property
+    def end_cas(self) -> str | None:
+        """Clip end formatted as an EZVIZ CAS timestamp, or None if unknown."""
+        stop = self.stop_millis
+        return None if stop is None else _cas_time(stop)
+
+
+def _cas_time(millis: int) -> str:
+    """Format epoch milliseconds as the UTC CAS timestamp the replay server expects."""
+    return dt.datetime.fromtimestamp(millis / 1000, tz=dt.UTC).strftime(
+        _CAS_TIME_FORMAT
+    )
+
+
+@dataclass(slots=True)
+class SdRecording:
+    """
+    An SD-card recording segment: a ``[begin, end]`` window on the device.
+
+    Played back over the ysproto ``/playback`` path (streaming module) using the CAS
+    timestamps; there is no per-clip file/ticket like cloud recordings.
+    """
+
+    begin_millis: int
+    end_millis: int
+    record_type: int | None
+
+    @property
+    def begin_cas(self) -> str:
+        """Segment start as an EZVIZ CAS timestamp."""
+        return _cas_time(self.begin_millis)
+
+    @property
+    def end_cas(self) -> str:
+        """Segment end as an EZVIZ CAS timestamp."""
+        return _cas_time(self.end_millis)
+
+    @property
+    def duration_ms(self) -> int:
+        """Segment length in milliseconds."""
+        return max(0, self.end_millis - self.begin_millis)
+
+    @property
+    def label(self) -> str:
+        """A readable UTC start time for a media-browser title."""
+        return _search_time(self.begin_millis)
+
+
+def _search_time(millis: int) -> str:
+    """Format epoch milliseconds as the UTC datetime string the record search wants."""
+    return dt.datetime.fromtimestamp(millis / 1000, tz=dt.UTC).strftime(
+        _SEARCH_TIME_FORMAT
+    )
+
+
+def _record_millis(value: Any) -> int | None:
+    """Parse a record timestamp (epoch s/ms, or a UTC date string) to epoch ms."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        ms = int(value)
+        return ms if ms > _EPOCH_MS_THRESHOLD else ms * 1000
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            ms = int(text)
+            return ms if len(text) >= _EPOCH_MS_DIGITS else ms * 1000
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y%m%dT%H%M%SZ"):
+            with suppress(ValueError):
+                naive = dt.datetime.strptime(text, fmt)  # noqa: DTZ007 - tz set next
+                return int(naive.replace(tzinfo=dt.UTC).timestamp() * 1000)
+    return None
+
+
+def _decode_record_list(body: dict[str, Any]) -> list[Any]:
+    """
+    Return the record list from a search response (plain or base64+zlib JSON).
+
+    The app compresses large record lists as a base64+zlib-encoded JSON string under
+    one of several keys; smaller responses embed a plain list.
+    """
+    for key in ("records", "record", "files", "fileList", "videos", "videoList"):
+        value = _deep_find(body, key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str) and value:
+            with suppress(ValueError, zlib.error, UnicodeDecodeError):
+                raw = zlib.decompress(base64.b64decode(value)).decode()
+                decoded = json.loads(raw)
+                if isinstance(decoded, list):
+                    return decoded
+    return []
+
+
+def _as_int(value: Any) -> int | None:
+    """Return ``value`` as an int if it is an int or a numeric string, else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.lstrip("-").isdigit():
+        return int(value)
+    return None
+
+
+def _sd_recording(item: dict[str, Any]) -> SdRecording | None:
+    """Build an SdRecording from a record descriptor, or None if unusable."""
+    begin = _record_millis(item.get("begin") or item.get("B") or item.get("startTime"))
+    end = _record_millis(item.get("end") or item.get("E") or item.get("stopTime"))
+    if begin is None or end is None or end <= begin:
+        return None
+    rec_type = item.get("type") or item.get("Type") or item.get("recordType")
+    return SdRecording(
+        begin_millis=begin,
+        end_millis=end,
+        record_type=_as_int(rec_type),
+    )
+
+
 def _api_host(region: str) -> str:
     code = REGION_API_CODES.get(region)
     if not code:
@@ -174,7 +351,7 @@ def _camera_from_resource(
     serial = resource.get("deviceSerial")
     if not serial or int(resource.get("resourceType", 0)) <= 0:
         return None
-    vtm = vtm_map.get(resource.get("resourceId")) or {}
+    vtm = vtm_map.get(resource.get("resourceId") or "") or {}
     info = dev_infos.get(serial, {})
     status = status_map.get(serial) or {}
     return EzvizCamera(
@@ -205,6 +382,49 @@ def _deep_find(obj: Any, key: str) -> Any:
             if (found := _deep_find(value, key)) is not None:
                 return found
     return None
+
+
+def _cloud_start_millis(video: dict[str, Any]) -> int | None:
+    """
+    Return a cloud clip's start time as epoch ms (reference: coverPic query first).
+
+    The precise millisecond start lives in the ``coverPic`` URL's ``startTime``
+    query param; the top-level ``startTime`` is a coarser UTC string fallback.
+    """
+    cover = video.get("coverPic")
+    if isinstance(cover, str):
+        values = parse_qs(urlparse(cover).query).get("startTime")
+        if values:
+            with suppress(ValueError):
+                return int(values[0])
+    start = video.get("startTime")
+    if isinstance(start, str):
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            with suppress(ValueError):
+                naive = dt.datetime.strptime(start, fmt)  # noqa: DTZ007 - tz set next
+                return int(naive.replace(tzinfo=dt.UTC).timestamp() * 1000)
+    if isinstance(start, int | float):
+        return int(start)
+    return None
+
+
+def _cloud_recording(video: dict[str, Any]) -> CloudRecording | None:
+    """Build a CloudRecording from a clip descriptor, or None if it has no seqId."""
+    seq_id = video.get("seqId")
+    if not seq_id:
+        return None
+    return CloudRecording(
+        seq_id=str(seq_id),
+        start_time=str(video.get("startTime") or ""),
+        stop_time=str(video.get("stopTime") or ""),
+        start_millis=_cloud_start_millis(video),
+        video_long=int(video.get("videoLong") or 0),
+        file_size=int(video["fileSize"]) if video.get("fileSize") else None,
+        storage_version=int(video.get("storageVersion") or _DEFAULT_STORAGE_VERSION),
+        crypt=bool(video.get("crypt")),
+        key_checksum=str(video.get("keyChecksum") or ""),
+        stream_url=video.get("streamUrl") or None,
+    )
 
 
 class EzvizCloudApi:
@@ -244,7 +464,7 @@ class EzvizCloudApi:
                 continue
             if code == _MFA_CODE:
                 raise MfaRequired
-            raise InvalidAuth(_AUTH_ERROR_HINTS.get(code, f"login code {code}"))
+            raise InvalidAuth(_AUTH_ERROR_HINTS.get(code or -1, f"login code {code}"))
         msg = "exhausted region-redirect retries"
         raise CannotConnect(msg)
 
@@ -347,7 +567,104 @@ class EzvizCloudApi:
         if not tokens:
             msg = f"no VTDU tokens returned (retcode={body.get('retcode')})"
             raise CannotConnect(msg)
-        return tokens[0]
+        return str(tokens[0])
+
+    async def async_get_cloud_videos(
+        self,
+        serial: str,
+        channel: int,
+        *,
+        limit: int = _DEFAULT_CLOUD_LIMIT,
+        video_type: int = _CLOUD_VIDEO_TYPE,
+    ) -> list[CloudRecording]:
+        """
+        Return the camera's cloud-stored clips, newest first. Requires a login.
+
+        Plain HTTPS (no VTDU session, no camera wake), so it is safe for battery
+        cameras. The returned descriptors feed the media browser and, per clip, the
+        cloud-replay playback session. An empty list means the API reported no clips.
+        """
+        if not self._session_id or not self._host:
+            raise EzvizStreamApiError(_NOT_LOGGED_IN)
+        query = urlencode(
+            {
+                "deviceSerial": serial,
+                "channelNo": channel,
+                "limit": limit,
+                "videoType": video_type,
+            }
+        )
+        body = await self._get(f"{self._host}{_CLOUD_VIDEOS_PATH}?{query}")
+        if (body.get("meta") or {}).get("code") != _HTTP_OK:
+            return []
+        return [
+            recording
+            for video in _deep_find(body, "videos") or []
+            if isinstance(video, dict) and (recording := _cloud_recording(video))
+        ]
+
+    async def async_get_camera_ticket(self, serial: str, channel: int) -> str:
+        """Fetch the per-camera playback ticket for cloud-replay. Requires a login."""
+        if not self._session_id or not self._host:
+            raise EzvizStreamApiError(_NOT_LOGGED_IN)
+        query = urlencode(
+            {
+                "deviceSerial": serial,
+                "channelNo": channel,
+                "supportMultiChannelSharedService": 0,
+            }
+        )
+        body = await self._get(f"{self._host}{_CAMERA_TICKET_PATH}?{query}")
+        info = _deep_find(body, "ticketInfo")
+        ticket = info.get("ticket") if isinstance(info, dict) else None
+        if not ticket:
+            msg = "no camera playback ticket returned"
+            raise CannotConnect(msg)
+        return str(ticket)
+
+    async def async_search_records(
+        self,
+        serial: str,
+        channel: int,
+        *,
+        start_millis: int,
+        stop_millis: int,
+        size: int = _DEFAULT_SD_SIZE,
+    ) -> list[SdRecording]:
+        """
+        Return SD-card recording segments within a time window. Requires a login.
+
+        Plain HTTPS against the device record index (no camera wake). The window is
+        given/returned in epoch milliseconds; each segment plays back over the
+        ysproto ``/playback`` path. An empty list means no SD footage in the window.
+        """
+        if not self._session_id or not self._host:
+            raise EzvizStreamApiError(_NOT_LOGGED_IN)
+        query = urlencode(
+            {
+                "deviceSerial": serial,
+                "channelNo": channel,
+                "startTime": _search_time(start_millis),
+                "stopTime": _search_time(stop_millis),
+                "size": size,
+                "sortBy": 0,
+                "requireLabel": 0,
+            }
+        )
+        body = await self._get(f"{self._host}{_SD_RECORDS_PATH}?{query}")
+        meta = body.get("meta") or {}
+        if meta.get("code") != _HTTP_OK:
+            # 2003 = device offline, 2004 = device exception. SD playback needs the
+            # camera reachable (it streams from the device), unlike cloud recordings.
+            _LOGGER.debug(
+                "SD record search for %s returned no records (meta=%s)", serial, meta
+            )
+            return []
+        return [
+            recording
+            for item in _decode_record_list(body)
+            if isinstance(item, dict) and (recording := _sd_recording(item))
+        ]
 
     async def _async_auth_addr(self) -> str:
         """Resolve (and cache) the auth-node host for token requests."""
@@ -364,8 +681,11 @@ class EzvizCloudApi:
             auth = _normalise_host(_deep_find(body, "authAddr"))
         except CannotConnect:
             auth = None
-        self._auth_addr = auth or self._host
-        return self._auth_addr
+        resolved = auth or self._host
+        if resolved is None:  # only reachable if called before login (host unset)
+            raise EzvizStreamApiError(_NOT_LOGGED_IN)
+        self._auth_addr = resolved
+        return resolved
 
     async def _post(self, url: str, data: dict[str, str]) -> dict[str, Any]:
         return await self._request("post", url, data=data)

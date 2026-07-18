@@ -53,7 +53,7 @@ ignore = [
 # the parse/decrypt functions are inherently branchy. Relaxed like scripts/ but
 # scoped to these specific files - the rest of the integration keeps full linting.
 # (See CLAUDE.md "Ruff Configuration" for the documented exception.)
-"custom_components/ezviz_stream/{decrypt,ysproto}.py" = [
+"custom_components/ezviz_stream/{decrypt_stream,ysproto}.py" = [
     "PLR2004", # magic values (bit masks, NAL types, RTP payload types)
     "C901", "PLR0911", "PLR0912", "PLR0915", # branchy depacketize/decrypt state machines
     "PLR0913", # protocol builders take several fields

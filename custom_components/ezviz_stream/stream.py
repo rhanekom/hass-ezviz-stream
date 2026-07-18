@@ -18,9 +18,9 @@ import asyncio
 import contextlib
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from .decrypt import StreamingPsDecryptor, decrypt_ps_video
+from .decrypt_stream import StreamingPsDecryptor, decrypt_ps_video
 from .ysproto import (
     CH_STREAM,
     MSG_STREAMINFO_RSP,
@@ -104,7 +104,7 @@ async def _streaminfo_exchange(
     writer: asyncio.StreamWriter,
     stream_url: str,
     vtm_stream_key: str | None,
-) -> dict[int, list]:
+) -> dict[int, list[Any]]:
     """Send a StreamInfoReq and return the decoded StreamInfoRsp fields."""
     writer.write(build_streaminfo_request(stream_url, vtm_stream_key))
     await writer.drain()
@@ -133,9 +133,19 @@ async def _open_connection(
 
 
 async def open_stream(
-    camera: EzvizCamera, token: str, *, stream: int
+    camera: EzvizCamera,
+    token: str,
+    *,
+    stream: int,
+    time_range: tuple[str, str] | None = None,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, str | None]:
-    """Do the VTM/VTDU handshake; return the live VTDU (reader, writer, streamssn)."""
+    """
+    Do the VTM/VTDU handshake; return the VTDU (reader, writer, streamssn).
+
+    With ``time_range`` (``(begin, end)`` CAS timestamps) this requests SD-card
+    playback (``/playback``) instead of the live stream; the handshake is otherwise
+    identical (reference: scripts/in/EzViz_Capture_Replay_SD.pcapng).
+    """
     if not camera.vtm_ip or not camera.vtm_port:
         msg = f"camera {camera.serial} has no VTM routing"
         raise StreamError(msg)
@@ -151,6 +161,7 @@ async def open_stream(
         stream=stream,
         biz=camera.biz,
         timestamp_ms=int(time.time() * 1000),
+        time_range=time_range,
     )
     try:
         fields = await _streaminfo_exchange(vtm_reader, vtm_writer, vtm_url, None)
@@ -309,17 +320,20 @@ async def capture_jpeg_from_ts(
     )
     assert proc.stdin is not None  # noqa: S101 - PIPE guarantees a writer
     assert proc.stdout is not None  # noqa: S101 - PIPE guarantees a reader
+    stdin = proc.stdin  # bound local so the None-narrowing holds inside _feed
 
     async def _feed() -> None:
         try:
             async for chunk in source:
-                proc.stdin.write(chunk)
-                await proc.stdin.drain()
-        except BrokenPipeError, ConnectionResetError, OSError:
-            pass  # FFmpeg emitted its frame and exited; stop feeding
+                stdin.write(chunk)
+                await stdin.drain()
+        except OSError:
+            # BrokenPipeError/ConnectionResetError both derive from OSError:
+            # FFmpeg emitted its frame and exited, so stop feeding.
+            pass
         finally:
             with contextlib.suppress(OSError):
-                proc.stdin.close()
+                stdin.close()
 
     feeder = asyncio.create_task(_feed())
     try:
@@ -655,6 +669,73 @@ async def iter_ps_decrypted(  # noqa: PLR0912, PLR0915 - reconnect loop + tracin
         await asyncio.sleep(_RETRY_BACKOFF)
 
 
+async def iter_playback_ps(  # noqa: PLR0913 - camera, token, tuning + the time range
+    camera: EzvizCamera,
+    token_factory: Callable[[], Awaitable[str]],
+    *,
+    stream: int,
+    verification_code: str,
+    begin_cas: str,
+    end_cas: str,
+) -> AsyncIterator[bytes]:
+    """
+    Yield decrypted MPEG-PS for one SD-card recording segment ``[begin, end]``.
+
+    A single **finite** ysproto ``/playback`` session (reference:
+    scripts/in/EzViz_Capture_Replay_SD.pcapng): opens once, streams until the segment
+    ends (the VTDU closes the session) and decrypts on the fly like
+    :func:`iter_ps_decrypted`. Unlike live it does NOT reconnect - a closed session
+    means the clip finished, so the generator ends.
+    """
+    loop = asyncio.get_running_loop()
+    token = await token_factory()
+    try:
+        reader, writer, stream_ssn = await open_stream(
+            camera, token, stream=stream, time_range=(begin_cas, end_cas)
+        )
+    except StreamError as err:
+        _LOGGER.debug("SD playback handshake failed for %s: %s", camera.serial, err)
+        return
+
+    frames = _FrameReader(reader)
+    last_ka = loop.time()
+    ka_seq = 1
+    decryptor = (
+        StreamingPsDecryptor(verification_code, decrypt_audio=True)
+        if verification_code
+        else None
+    )
+    try:
+        while True:
+            if stream_ssn and loop.time() - last_ka >= _KEEPALIVE_INTERVAL:
+                writer.write(build_keepalive(stream_ssn, seq=ka_seq))
+                await writer.drain()
+                ka_seq += 1
+                last_ka = loop.time()
+            frame = await frames.next_frame(loop.time() + _READ_SLICE)
+            if frame is None:
+                if frames.closed:
+                    break  # segment finished; the VTDU closed the session
+                continue
+            channel, _msgcode, body = frame
+            if channel != CH_STREAM or not body:
+                continue
+            if decryptor is not None:
+                chunk = await asyncio.to_thread(decryptor.feed, body)
+            else:
+                chunk = body
+            if chunk:
+                yield chunk
+        if decryptor is not None:
+            tail = await asyncio.to_thread(decryptor.flush)
+            if tail:
+                yield tail
+    finally:
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
+
+
 async def stream_annexb(
     camera: EzvizCamera,
     token_factory: Callable[[], Awaitable[str]],
@@ -666,9 +747,9 @@ async def stream_annexb(
     Write the continuous Annex-B HEVC stream to ``out`` (blocking file-like).
 
     Thin wrapper over :func:`iter_annexb` for the standalone CLI producer
-    (``producer.py``); the integration itself consumes ``iter_annexb`` in-process via
-    :mod:`broadcast`. Runs until cancelled. The RTP timestamp is unused here (the CLI
-    just dumps the bitstream).
+    (``scripts/ezviz_producer.py``); the integration itself consumes ``iter_annexb``
+    in-process via :mod:`broadcast`. Runs until cancelled. The RTP timestamp is unused
+    here (the CLI just dumps the bitstream).
     """
     async for _rtp_ts, chunk in iter_annexb(camera, token_factory, stream=stream):
         out.write(chunk)

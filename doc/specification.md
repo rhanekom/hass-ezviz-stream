@@ -322,7 +322,6 @@ hass-ezviz-stream/
     decrypt.py        # AES-ECB Image-Encryption decryptor (one-shot + streaming)
     broadcast.py      # on-demand MPEG-TS broadcaster (one session, fanned out)
     stream_view.py    # token-guarded HTTP MPEG-TS view go2rtc pulls
-    producer.py       # standalone CLI diagnostic (not used at runtime)
     manifest.json     # requirements: pycryptodome (no pyEzvizApi)
   doc/specification.md
 ```
@@ -367,6 +366,11 @@ APIs. Notes:
 - **Optional convenience.** The config flow *may* enumerate existing `ezviz`
   devices (via the public device/entity registry) to pre-fill the serial picker -
   a nicety, not a requirement.
+- **Distinct entity name.** Because we share the device card, our camera and the
+  official `ezviz` camera would both render as the bare device name (both use
+  `has_entity_name` with no sub-name). We give ours the sub-name `"Cloud"` so it
+  composes to `"<device> Cloud"` and is easy to tell apart; standalone this is
+  harmlessly redundant.
 
 > **Correction (2026-07-12).** Earlier drafts called this "the Powercalc pattern"
 > and implied that project attaches via matching `device_info` identifiers. It

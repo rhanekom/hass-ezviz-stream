@@ -24,7 +24,7 @@ from pyezvizapi.stream import (
     detect_hikvision_ps_video_nalu_header_size as oracle_detect,
 )
 
-from custom_components.ezviz_stream import decrypt as ez
+from custom_components.ezviz_stream import decrypt_stream as ez
 
 CODE = "ezviz-test-code"  # synthetic AES key material for tests, not a real secret
 
@@ -275,3 +275,34 @@ def test_streaming_safety_valve_on_open_run() -> None:
         dec = ez.StreamingPsDecryptor(CODE, nalu_header_size=2)
         chunk = b"\x00\x00\x01\xe0\x00\x00\x80\x00\x00" + bytes(64)
         assert dec.feed(chunk) == b""  # nothing complete to emit despite the big buffer
+
+
+def test_decrypt_ps_audio_recovers_aac_body() -> None:
+    """An audio PES's AAC body is ECB-decrypted; the ADTS header stays clear."""
+    key = "verifycode"
+    adts = b"\xff\xf1\x60\x40\x20\xbf\xfc"  # 7-byte ADTS header (protection_absent=1)
+    body = bytes(range(40))  # 2 full 16-byte blocks encrypted + 8-byte clear tail
+    enc = (len(body) // 16) * 16
+    cipher_body = ez._aes(ez._aes_key(key)).encrypt(body[:enc]) + body[enc:]
+    frame = adts + cipher_body
+    pes_hdr = b"\x80\x00\x00"  # PES flags 0x80, header-data-length 0
+    pes = (
+        b"\x00\x00\x01\xc0"
+        + (len(pes_hdr) + len(frame)).to_bytes(2, "big")
+        + pes_hdr
+        + frame
+    )
+    out = ez.decrypt_ps_audio(pes, key)
+    assert out[9:] == adts + body  # payload at offset 9; header kept, body recovered
+
+
+def test_decrypt_ps_audio_ignores_non_adts_payload() -> None:
+    """A non-ADTS audio payload is left untouched (no false decryption)."""
+    payload = b"\x11" * 40  # no 0xFF ADTS sync
+    pes = (
+        b"\x00\x00\x01\xc0"
+        + (3 + len(payload)).to_bytes(2, "big")
+        + b"\x80\x00\x00"
+        + payload
+    )
+    assert ez.decrypt_ps_audio(pes, "k") == pes

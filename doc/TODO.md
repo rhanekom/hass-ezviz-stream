@@ -1,46 +1,17 @@
 # TODO - hass-ezviz-stream
 
 Forward-looking action list. The authoritative *design* is `specification.md`;
-protocol findings are in `reference.md`. Keep this lean - **prune landed work rather
-than accumulating it** (details live in the specs + git history).
+protocol findings are in `reference.md`; shipped features per release are in
+`../VERSION_HISTORY.md`. Keep this lean - **prune landed work rather than accumulating
+it** (details live in `VERSION_HISTORY.md`, the specs, and git history).
 
-## Where we are (2026-07-14)
+## Where we are (2026-07-18)
 
-The integration is built and **live-verified end to end for both camera transports**
-(battery RTP/HEVC and mains/IPC encrypted MPEG-PS). It installs via HACS, passes
-`hassfest` + HACS CI, and has full unit-test coverage. What remains is polish
-(options, MJPEG fallback, docs) and one open design decision (live buffering).
-
-## Shipped (v0.1)
-
-High-level features that are done and verified. Implementation lives in the code +
-git history; this list is the feature-level summary.
-
-- **Account + camera setup.** Own two-step config flow: account (email / password /
-  region, validated) then per-camera add, each with its own Image-Encryption
-  verification code. Per-camera **reconfigure**, account **reauth**, and a **frame-grab
-  validation** on save (retry / save-anyway soft block). Simple form with an
-  **Advanced** section (thumbnail source, snapshot refresh interval, main/sub
-  stream; battery cams default to **static-then-newer-motion** + **sub stream** + a
-  long interval) and a **battery-drain warning**. Account **options flow** tunes max
-  concurrent snapshot fetches. Camera entities link to the official `ezviz` device.
-- **Cloud protocol core (no runtime `pyezvizapi`).** Hand-rolled region login,
-  device discovery, VTDU token, and the VTM/VTDU `ysproto` handshake; RTP/RFC-7798
-  HEVC depacketizer; MPEG-PS transport; our own AES-ECB Image-Encryption decryptor
-  (one-shot + an incremental streaming variant), byte-for-byte oracle-validated.
-  Reconnect across the ~27 s VTDU drop + KeepAlive.
-- **Live view.** On-demand local HTTP MPEG-TS view, fanned out from a **single**
-  per-camera cloud session to go2rtc (WebRTC), the HLS `stream` component, and
-  snapshots - so a dashboard never opens concurrent sessions. Streams only while
-  watched (battery-friendly). RTP-clock playback pacing keeps timing smooth. Both
-  transports confirmed live in HA.
-- **Snapshots.** On-demand JPEG grab, cached (battery cams poll far less), and the
-  last good frame is retained across restarts so tiles never go blank. Battery cams
-  default to the **last cloud motion image** as their thumbnail (fetched over HTTPS
-  from the alarms API, no camera wake; still-image `hikencodepicture` payloads
-  decrypted with the verification code), seeded once with a live grab if none exists.
-- **Tooling / CI.** `hassfest` + HACS validation green; duplicate-code pre-commit
-  hook; account credentials stay in memory only (no secrets on disk).
+**v0.3.0 released (cloud + SD recordings & playback landed since v0.2.0).** The integration is
+live-verified end to end for both camera transports (battery RTP/HEVC and mains/IPC
+encrypted MPEG-PS), installs via HACS, passes `hassfest` + HACS CI, and has full
+unit-test coverage. The flagship net-add (cloud + SD recordings) has landed; what
+remains is the deferred/nice-to-have backlog below.
 
 ## Locked decisions (details in `specification.md`)
 
@@ -62,30 +33,57 @@ git history; this list is the feature-level summary.
   Mitigation for a weak link is the **sub-stream** (lower bitrate) + the network
   itself. MJPEG is *not* a fix here - its higher bandwidth worsens a constrained link.
 
-## Remaining
+## Feature backlog (net-add vs official `ezviz`)
 
-- [ ] **Options flow additions.** Codec (transcode vs native HEVC - needs the go2rtc
-      wiring decision); serving mode (needs MJPEG first); diagnostics download.
-- [ ] **README / docs** - install + configuration.
-- [ ] **HACS brands** - PR icon/logo assets to `home-assistant/brands` before
-      default-store submission (CI currently ignores the `brands` check).
+**Constraint: net-add only** - never duplicate the official `ezviz` integration.
+It already ships PTZ (buttons), privacy/defence switches, sound-alarm siren,
+firmware update, night-vision / work-mode selects, floodlight light, sensitivity
+number, arm/disarm, and motion/alarm sensors - all out of scope. Only build what it
+lacks. No runtime `pyezvizapi` (port behaviour into `api.py`, as with auth/decrypt).
+
+- [ ] **MQTT push notifications (valuable; DEFERRED - not scheduled soon).** Official
+      `ezviz` is polling-only - its Motion sensor is a 30 s coordinator poll, and
+      `paho_mqtt` is only a transitive `loggers` entry (no client started) - so
+      real-time push is net-add. Use it to drive event-based snapshot refresh and cut
+      battery-cam wakes; scope v1 to **thumbnail refresh**, not a duplicate motion
+      sensor (the official polled one already exists on the same device). Port
+      `pyezvizapi.mqtt.MQTTClient` (dev-only oracle) into our own module:
+      - **Prerequisite:** login today captures only `session_id` + `host`; MQTT also
+        needs the EZVIZ internal `username` and the `pushAddr` (service URLs), so
+        `api.py` login must capture both first.
+      - **Handshake (plain HTTPS on the token's `pushAddr`):** register (-> `clientId`)
+        -> start (-> `ticket`) -> connect broker `pushAddr:1882` TCP MQTTv3.1.1,
+        subscribe `"<appKey>/#"` QoS 2 -> stop tells the server to stop pushing.
+      - **Payload:** JSON whose `ext` is a comma-separated string decoded to fields:
+        `channel_type, time, device_serial, channel_no, alert_type_code,
+        default_pic_url, media_url_alt1/2, resource_type, status_flag, file_id,
+        is_encrypted, picChecksum, is_dev_video, metadata, msgId, image, device_name,
+        reserved, sequence_number`. `device_serial` + `alert_type_code` + `time`
+        target the refresh; `default_pic_url` (+ `is_encrypted`) is a fresh alarm
+        image, replacing our alarms-API poll.
+      - **Runtime dep:** prefer **paho-mqtt directly** - HA core already bundles it, so
+        no new runtime dependency and no version-clash risk (cost: its background
+        thread needs a `call_soon_threadsafe` hop to the loop). `aiomqtt` is a nicer
+        async fit but adds a dep pinning paho, which must be checked against HA's paho
+        first. One account-wide client in the entry lifecycle, fanning events to
+        cameras by serial; register/start/stop over our existing aiohttp session.
 
 ## Later / nice-to-have
 
+- [ ] **Recordings polish.** An event-type timeline / date grouping in the media
+      browser, and an in-HA media-browser playback smoke test (the feature itself
+      shipped in 0.3.0 - see `../VERSION_HISTORY.md`).
+- [ ] **Cloud-clip audio decryption (investigate).** Audio decrypt is validated on
+      Deck **SD** but produces garbage on Front Door **cloud** clips (`sample_rate=0`,
+      AAC-encode fails) while the video decrypts perfectly - so the "clear ADTS header +
+      AES-ECB body" scheme doesn't hold across all camera/transport combos. Undecodable
+      audio is currently dropped (`-an`) so video still plays (see `reference.md` E.4).
+      To finish: get a plaintext oracle for a cloud clip (unencrypted camera, or an
+      encryption-off/on pair) and bit-diff the audio transform for the cloud path.
 - [ ] MFA / SMS verification-code login (a differentiator; `Bobsilvio/ezviz_hp7`
       shows the approach works). 2FA fast-follow.
-- [ ] Multi-camera niceties; pre-fill the camera picker from existing `ezviz`
-      devices (§6.3).
 - [ ] **MJPEG serving mode - compatibility fallback only.** Opt-in path that decodes
       to JPEG server-side (no go2rtc/WebRTC, no HEVC-in-browser), via a `mjpeg_source`
       sibling of `broadcast.mpegts_source` through the existing `CameraBroadcast`.
       Scope is *codec/browser incompatibility*, NOT network jitter (its 4-8x bandwidth
       worsens a weak link). Low priority unless a real compatibility gap turns up.
-
-## Container rebuild notes
-
-- `uv sync` restores the venv from `uv.lock` after a rebuild.
-- `.git` ownership gotcha: setup commits can leave `.git/objects/*` root-owned,
-  blocking `git add` - fix with `sudo chown -R vscode:vscode .git`.
-- `.env` (creds), `scripts/in/` + `scripts/out/` (captures), and `*.jpg` are
-  gitignored - keep them out of commits.

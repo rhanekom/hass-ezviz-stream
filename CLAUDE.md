@@ -124,6 +124,14 @@ If you need a tool that isn't installed, install it **and persist it**: global
 tools go in the Dockerfile, user/project tools go in the `setup` script — never
 rely on an ad-hoc install that vanishes on the next rebuild.
 
+Container rebuild gotchas:
+
+- `uv sync` restores the venv from `uv.lock` after a rebuild.
+- `.git` ownership gotcha: setup can leave `.git/objects/*` root-owned, blocking
+  `git add` - fix with `sudo chown -R vscode:vscode .git`.
+- `.env` (creds), `scripts/in/` + `scripts/out/` (captures), and `*.jpg` are
+  gitignored - keep them out of commits.
+
 ## MCP Launchpad (`mcpl`)
 
 `mcpl` is a CLI gateway to tools from all configured MCP servers. The user's MCP
@@ -151,7 +159,7 @@ All lint rules enabled (`select = ["ALL"]`) with specific exclusions. Target: Py
   `per-file-ignores` in `.ruff.toml`. The exceptions are the `tests/` and
   `scripts/` directories, whose `per-file-ignores` blocks in `.ruff.toml` are the
   accepted place to relax rules wholesale (test/CLI ergonomics), **and the low-level
-  protocol/codec modules** (`custom_components/ezviz_stream/{decrypt,ysproto}.py`),
+  protocol/codec modules** (`custom_components/ezviz_stream/{decrypt_stream,ysproto}.py`),
   which have a scoped `per-file-ignores` block relaxing magic-value/complexity/
   message-style rules — dense bit-twiddling (NAL masks, RTP fields, AES maths) where
   naming every mask hurts readability. Keep that carve-out *narrow* (only those
@@ -206,6 +214,14 @@ Since v0.1.0 the repo uses a two-branch model:
 - **Code must be accompanied by tests.** New/changed integration code lands with
   tests; mock Home Assistant with `pytest-homeassistant-custom-component` (see
   Testing above). The `pytest` pre-commit hook enforces this on every `.py` change.
+- **Debugging / diagnostic tools go in `scripts/`, never in
+  `custom_components/ezviz_stream/`.** The component package ships to users and stays
+  runtime-only; standalone CLIs, live-verification probes, and one-off debugging
+  helpers live in `scripts/` (see `scripts/README.md`), where `.ruff.toml` relaxes
+  CLI-ergonomics rules and the `.env`/`--creds-file` credential pattern lives. Reusable
+  logic a script needs stays in the component (and is tested there); the script only
+  imports it. They add the repo root to `sys.path` to import
+  `custom_components.ezviz_stream.*`.
 - **Research, don't assume** — verify options (including via web search) rather
   than assuming APIs/libraries behave as described.
 - **If something can be caught by a pre-commit hook, add it** — prefer enforcing a

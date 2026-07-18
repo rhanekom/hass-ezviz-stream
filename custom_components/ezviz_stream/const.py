@@ -19,6 +19,20 @@ CONF_MAX_SNAPSHOTS: Final = "max_concurrent_snapshots"
 DEFAULT_MAX_SNAPSHOTS: Final = 1
 MAX_MAX_SNAPSHOTS: Final = 5
 
+# Account-level toggle: expose this account's cloud recordings in the HA media
+# library (media_source). OFF by default - the media library is broadly visible, so
+# surfacing recordings there is opt-in for privacy. Enable it in the account options.
+CONF_ENABLE_RECORDINGS: Final = "enable_recordings"
+DEFAULT_ENABLE_RECORDINGS: Final = False
+
+# Per-camera override of the account-level recordings toggle. "default" follows the
+# account setting; "on"/"off" force it for this camera regardless of the account.
+CONF_RECORDINGS_MODE: Final = "recordings_mode"
+RECORDINGS_MODE_DEFAULT: Final = "default"
+RECORDINGS_MODE_ON: Final = "on"
+RECORDINGS_MODE_OFF: Final = "off"
+DEFAULT_RECORDINGS_MODE: Final = RECORDINGS_MODE_DEFAULT
+
 # Camera subentries: the account is the config entry; each camera is a subentry
 # carrying its own serial and (optional) Image-Encryption verification code.
 CAMERA_SUBENTRY_TYPE: Final = "camera"

@@ -19,6 +19,10 @@ from custom_components.ezviz_stream import stream, ysproto
 from custom_components.ezviz_stream.api import EzvizCamera
 
 
+class _StopLoopError(Exception):
+    """Sentinel raised from a patched sleep to break an iterator's reconnect loop."""
+
+
 # --------------------------------------------------------------------------- #
 # Fakes / helpers
 # --------------------------------------------------------------------------- #
@@ -291,6 +295,27 @@ async def test_capture_session_mpeg_ps_decrypts_with_code() -> None:
     decrypt.assert_called_once()
 
 
+async def test_capture_session_sends_keepalive_and_skips_non_media() -> None:
+    """A grab session sends keepalives and ignores control/empty frames."""
+    reader = asyncio.StreamReader()
+    reader.feed_data(ysproto.build_frame(0x00, 0x1234, b"ctrl"))  # control channel
+    reader.feed_data(ysproto.build_frame(ysproto.CH_STREAM, 0, b""))  # empty body
+    frame, expected = _rtp_frame(6000)
+    reader.feed_data(frame)
+    reader.feed_eof()
+    writer = _writer()
+    loop = asyncio.get_running_loop()
+
+    with patch.object(stream, "_KEEPALIVE_INTERVAL", 0.0):  # fire keepalive every loop
+        transport, media = await stream._capture_session(
+            reader, writer, "SSN", verification_code="", deadline=loop.time() + 5
+        )
+
+    assert transport == "rtp"
+    assert media == expected  # control + empty skipped; only the media contributed
+    writer.write.assert_called()  # at least one keepalive was sent
+
+
 # --------------------------------------------------------------------------- #
 # _decode_jpeg
 # --------------------------------------------------------------------------- #
@@ -333,7 +358,8 @@ class _FakeStdin:
         self.written.extend(data)
 
     async def drain(self) -> None:
-        pass
+        # No-op stand-in: StreamWriter.drain is async, so the fake matches it.
+        return
 
     def close(self) -> None:
         self.closed = True
@@ -521,20 +547,47 @@ async def test_iter_annexb_yields_depacketized_chunk() -> None:
     writer.close.assert_called_once()  # aclose ran the finally
 
 
+async def test_iter_annexb_keepalive_skips_and_reconnects() -> None:
+    """Cover the productive session loop: keepalive, frame skips, and reconnect.
+
+    Keepalives are sent, non-media frames skipped, media yielded, then a peer-close
+    drives the finally + reconnect path (a produced session resets the failure count).
+    """
+    reader = asyncio.StreamReader()
+    reader.feed_data(ysproto.build_frame(0x00, 0x1234, b"ctrl"))  # control channel
+    reader.feed_data(ysproto.build_frame(ysproto.CH_STREAM, 0, b""))  # empty body
+    media, expected = _rtp_frame(6000)
+    reader.feed_data(media)
+    reader.feed_eof()  # after media: frames.closed -> break -> reconnect
+    writer = _writer()
+
+    with (
+        patch.object(
+            stream, "open_stream", AsyncMock(return_value=(reader, writer, "SSN"))
+        ),
+        patch.object(stream, "_KEEPALIVE_INTERVAL", 0.0),  # fire keepalive every loop
+        patch.object(stream.asyncio, "sleep", AsyncMock(side_effect=_StopLoopError)),
+    ):
+        gen = stream.iter_annexb(_camera(), AsyncMock(return_value="tok"), stream=1)
+        rtp_ts, chunk = await gen.__anext__()  # control + empty skipped, media yielded
+        with pytest.raises(_StopLoopError):
+            await gen.__anext__()  # EOF -> break -> finally -> reset -> sleep(raise)
+
+    assert (rtp_ts, chunk) == (6000, expected)
+    writer.write.assert_called()  # at least one keepalive was sent
+    writer.close.assert_called_once()  # the finally ran on peer-close
+
+
 async def test_iter_annexb_backoff_on_handshake_error() -> None:
     """A handshake error logs, backs off, and loops (we break out via the sleep)."""
-
-    class _StopError(Exception):
-        """Sentinel raised from the patched sleep to break the reconnect loop."""
-
     with (
         patch.object(
             stream, "open_stream", AsyncMock(side_effect=stream.StreamError("x"))
         ),
-        patch.object(stream.asyncio, "sleep", AsyncMock(side_effect=_StopError)),
+        patch.object(stream.asyncio, "sleep", AsyncMock(side_effect=_StopLoopError)),
     ):
         gen = stream.iter_annexb(_camera(), AsyncMock(return_value="tok"), stream=1)
-        with pytest.raises(_StopError):
+        with pytest.raises(_StopLoopError):
             await gen.__anext__()
 
 
@@ -646,6 +699,35 @@ async def test_iter_ps_decrypted_decrypts_with_code() -> None:
 
     assert chunk == b"DEC"
     fake_decryptor.feed.assert_called_once()
+
+
+async def test_iter_ps_decrypted_keepalive_skips_and_reconnects() -> None:
+    """PS session: keepalives sent, non-media skipped, media yielded, then reconnect."""
+    reader = asyncio.StreamReader()
+    reader.feed_data(ysproto.build_frame(0x00, 0x1234, b"ctrl"))  # control channel
+    reader.feed_data(ysproto.build_frame(ysproto.CH_STREAM, 0, b""))  # empty body
+    ps_body = b"\x00\x00\x01\xbapsdata"
+    reader.feed_data(_ps_frame(ps_body))
+    reader.feed_eof()  # after media: frames.closed -> break -> reconnect
+    writer = _writer()
+
+    with (
+        patch.object(
+            stream, "open_stream", AsyncMock(return_value=(reader, writer, "SSN"))
+        ),
+        patch.object(stream, "_KEEPALIVE_INTERVAL", 0.0),  # fire keepalive every loop
+        patch.object(stream.asyncio, "sleep", AsyncMock(side_effect=_StopLoopError)),
+    ):
+        gen = stream.iter_ps_decrypted(
+            _camera(), AsyncMock(return_value="tok"), stream=1, verification_code=""
+        )
+        chunk = await gen.__anext__()  # control + empty skipped, PS body passed through
+        with pytest.raises(_StopLoopError):
+            await gen.__anext__()  # EOF -> break -> finally -> reset -> sleep(raise)
+
+    assert chunk == ps_body
+    writer.write.assert_called()  # at least one keepalive was sent
+    writer.close.assert_called_once()  # the finally ran on peer-close
 
 
 # --------------------------------------------------------------------------- #

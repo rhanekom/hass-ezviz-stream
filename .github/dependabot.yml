@@ -9,6 +9,9 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Let a new release settle before opening a PR (avoids churn on yanked/hotfixed tags).
+    cooldown:
+      default-days: 7
 
   # Python dependencies. This is a uv project, so use the "uv" ecosystem (not "pip")
   # so pyproject.toml + uv.lock and the dependency-groups are read correctly.
@@ -20,5 +23,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     ignore:
       - dependency-name: "homeassistant"

@@ -51,6 +51,26 @@ def _aes_key(key: str | bytes) -> bytes:
     return key_bytes.ljust(16, b"\0")[:16]
 
 
+class Decryptor:
+    """The AES-ECB primitive the EZVIZ Image-Encryption decryption is built on.
+
+    Holds the camera key (the verification code, zero-padded/truncated to 16 bytes)
+    as a single reusable ECB cipher; ECB is stateless per block, so one instance
+    decrypts every NAL body in a stream. This is the only cipher in the module - the
+    surrounding :func:`decrypt_ps_video` / :func:`detect_nalu_header_size` logic is
+    clear MPEG-PS/NAL parsing that calls :meth:`decrypt_block` for the encrypted runs.
+    """
+
+    def __init__(self, key: str | bytes) -> None:
+        """Derive the 16-byte AES key from ``key`` and build the ECB cipher once."""
+        self._cipher = _aes(_aes_key(key))
+
+    def decrypt_block(self, data: bytes) -> bytes:
+        """AES-ECB-decrypt ``data`` (a whole number of 16-byte blocks)."""
+        plaintext: bytes = self._cipher.decrypt(data)
+        return plaintext
+
+
 # --------------------------------------------------------------------------- #
 # MPEG-PS stream-id classifiers + PES/packet parsing
 # --------------------------------------------------------------------------- #
@@ -371,7 +391,7 @@ def detect_nalu_header_size(
 ) -> int | None:
     """Detect clear codec-header bytes to preserve before AES: 2=HEVC, 1=H.264
     clear header, 0=H.264 encrypted header. ``default`` if no video NAL evidence."""
-    aes_key = _aes_key(key)
+    decryptor = Decryptor(key)
     scores = {"hevc": 0, "hevc-encrypted-header": 0, "h264-clear-header": 0, "h264": 0}
     for payload_start, payload_end in _video_pes_payload_ranges(data):
         for pos, length in _find_nal_start_codes(data, payload_start, payload_end):
@@ -383,7 +403,7 @@ def detect_nalu_header_size(
                     data[header_pos] & 0x1F
                 )
             if header_pos + AES_BLOCK <= payload_end:
-                decrypted = _aes(aes_key).decrypt(
+                decrypted = decryptor.decrypt_block(
                     bytes(data[header_pos : header_pos + AES_BLOCK])
                 )
                 first = decrypted[0]
@@ -425,7 +445,7 @@ def decrypt_ps_video(
     if nalu_header_size < 0:
         raise ValueError("nalu_header_size must be non-negative")
 
-    aes_key = _aes_key(key)
+    decryptor = Decryptor(key)
 
     def find_nal_start_codes(buf: bytes, start: int, end: int) -> list[tuple[int, int]]:
         if nalu_header_size == 1:
@@ -439,7 +459,7 @@ def decrypt_ps_video(
             header = pos + length
             if header + AES_BLOCK > end:
                 continue
-            dec = _aes(aes_key).decrypt(bytes(buf[header : header + AES_BLOCK]))
+            dec = decryptor.decrypt_block(bytes(buf[header : header + AES_BLOCK]))
             t = dec[0] & 0x1F
             if _is_plausible_hevc_header_bytes(dec[:2]) or (
                 (dec[0] & 0x80) == 0 and 1 <= t <= 23
@@ -475,7 +495,7 @@ def decrypt_ps_video(
                 active_nal_decrypted += 1
                 if len(pending_block) != AES_BLOCK:
                     continue
-                dec = _aes(aes_key).decrypt(bytes(pending_block))
+                dec = decryptor.decrypt_block(bytes(pending_block))
                 for block_pos, dec_byte in zip(pending_positions, dec, strict=True):
                     payload_output[block_pos] = dec_byte
                 pending_positions.clear()
@@ -484,7 +504,7 @@ def decrypt_ps_video(
         def starts_plausible_encrypted_nal(start: int, end: int) -> bool:
             if end - start < AES_BLOCK:
                 return False
-            dec = _aes(aes_key).decrypt(
+            dec = decryptor.decrypt_block(
                 bytes(payload_output[start : start + AES_BLOCK])
             )
             t = dec[0] & 0x1F
@@ -571,6 +591,74 @@ def decrypt_ps_video(
 
 
 # --------------------------------------------------------------------------- #
+# Audio (AAC) payload decryption
+# --------------------------------------------------------------------------- #
+# EZVIZ encrypts audio like video: the ADTS framing header stays clear and the AAC
+# frame body after it is AES-ECB encrypted with the same key. Verified against a
+# validated key (video decrypts cleanly with it) - reference
+# scripts/in/EzViz_Capture_Replay_SD_Unec_Enc.pcapng (0 decode errors over 657 frames).
+_ADTS_SYNC = 0xFF
+_ADTS_HEADER_LEN = 7  # protection_absent=1 (no CRC); 9 bytes when a CRC is present
+
+
+def _adts_header_len(frame: bytes) -> int:
+    """ADTS header length: 7 bytes normally, 9 when the CRC-present bit is clear."""
+    return _ADTS_HEADER_LEN if len(frame) >= 2 and frame[1] & 0x01 else 9
+
+
+def _audio_pes_payloads(data: bytes) -> list[tuple[int, int]]:
+    """(payload_start, payload_end) of each audio PES packet (stream 0xC0-0xDF).
+
+    Advances over each PES by its length so it never scans *into* a video payload
+    (whose Annex-B NAL start codes could otherwise be misread as PES starts).
+    """
+    out: list[tuple[int, int]] = []
+    i = 0
+    while i < len(data) - 6:
+        if data[i : i + 3] != MPEG_START_CODE_PREFIX:
+            i += 1
+            continue
+        stream_id = data[i + 3]
+        if stream_id == _PACK_HEADER:
+            i += 14  # MPEG-2 pack header (+ stuffing handled by resync below)
+            continue
+        if 0xC0 <= stream_id <= 0xEF or stream_id == _PRIVATE_STREAM_1:
+            pes_length = int.from_bytes(data[i + 4 : i + 6], "big")
+            end = i + 6 + pes_length
+            if pes_length and end <= len(data):
+                if 0xC0 <= stream_id <= 0xDF:  # audio
+                    payload_start = _pes_payload_start(data, i) or (i + 6)
+                    if payload_start < end:
+                        out.append((payload_start, end))
+                i = end  # skip the whole packet (video included)
+                continue
+        i += 1
+    return out
+
+
+def decrypt_ps_audio(data: bytes, key: str | bytes) -> bytes:
+    """Return ``data`` with each audio PES's AAC body decrypted (ADTS header clear).
+
+    Each audio PES carries one ADTS AAC frame; the body after the ADTS header is
+    AES-ECB encrypted (whole 16-byte blocks; a trailing partial block stays clear).
+    Non-ADTS payloads are left untouched. Video PES are not touched (see
+    :func:`decrypt_ps_video`).
+    """
+    decryptor = Decryptor(key)
+    out = bytearray(data)
+    for start, end in _audio_pes_payloads(data):
+        frame = out[start:end]
+        if not frame or frame[0] != _ADTS_SYNC:
+            continue
+        header = _adts_header_len(bytes(frame))
+        enc = ((len(frame) - header) // AES_BLOCK) * AES_BLOCK
+        if enc > 0:
+            clear = decryptor.decrypt_block(bytes(frame[header : header + enc]))
+            out[start + header : start + header + enc] = clear
+    return bytes(out)
+
+
+# --------------------------------------------------------------------------- #
 # Streaming decryption (continuous IPC live view)
 # --------------------------------------------------------------------------- #
 _DETECT_MIN_BYTES = 64 * 1024  # buffer this much before auto-detecting nalu_header_size
@@ -588,15 +676,24 @@ class StreamingPsDecryptor:
 
     ``nalu_header_size`` is auto-detected once (it is stable per camera) after
     ``_DETECT_MIN_BYTES`` have accumulated, then reused for the whole stream.
+
+    With ``decrypt_audio`` the emitted bytes also have their AAC audio decrypted (see
+    :func:`decrypt_ps_audio`); the default is video-only, which keeps the output equal
+    to :func:`decrypt_ps_video` for the oracle test.
     """
 
     def __init__(
-        self, key: str | bytes, *, nalu_header_size: int | None = None
+        self,
+        key: str | bytes,
+        *,
+        nalu_header_size: int | None = None,
+        decrypt_audio: bool = False,
     ) -> None:
         """Start with an empty buffer; detect the header size lazily if not given."""
         self._key = key
         self._nalu_header_size = nalu_header_size
         self._buf = bytearray()
+        self._decrypt_audio = decrypt_audio
 
     def feed(self, chunk: bytes) -> bytes:
         """Add ``chunk`` and return any now-safe decrypted bytes (may be empty)."""
@@ -635,4 +732,7 @@ class StreamingPsDecryptor:
         nalu_header_size = (
             self._nalu_header_size if self._nalu_header_size is not None else 2
         )
-        return decrypt_ps_video(prefix, self._key, nalu_header_size=nalu_header_size)
+        result = decrypt_ps_video(prefix, self._key, nalu_header_size=nalu_header_size)
+        if self._decrypt_audio:
+            result = decrypt_ps_audio(result, self._key)
+        return result

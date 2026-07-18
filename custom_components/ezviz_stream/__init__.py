@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, Platform
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import CannotConnect, EzvizCloudApi, InvalidAuth, MfaRequired
@@ -18,11 +20,12 @@ from .const import (
     CONF_MAX_SNAPSHOTS,
     CONF_REGION,
     CONF_SERIAL,
+    CONF_VERIFICATION_CODE,
     DEFAULT_MAX_SNAPSHOTS,
     DOMAIN,
     OFFICIAL_EZVIZ_DOMAIN,
 )
-from .stream_view import EzvizStreamMediaView
+from .stream_view import EzvizReplayView, EzvizStreamMediaView
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -31,6 +34,8 @@ if TYPE_CHECKING:
 PLATFORMS: list[Platform] = [Platform.CAMERA]
 
 _VIEW_REGISTERED = "view_registered"
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -44,6 +49,11 @@ class EzvizStreamData:
     # its entity) from a pure removal (which does not - reloading would needlessly
     # re-login and, if EZVIZ throttles it, briefly drop every other camera).
     camera_subentries: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Serials of cameras that report Image Encryption on but have no verification code
+    # stored (e.g. encryption was toggled on after setup). Their stream/recordings
+    # can't be decrypted, so the camera entity marks itself unavailable and a repair
+    # issue asks the user to reconfigure. Populated once per (re)load.
+    encrypted_without_code: set[str] = field(default_factory=set)
 
 
 type EzvizStreamConfigEntry = ConfigEntry[EzvizStreamData]
@@ -56,6 +66,50 @@ def _camera_subentries(entry: EzvizStreamConfigEntry) -> dict[str, dict[str, Any
         for subentry_id, subentry in entry.subentries.items()
         if subentry.subentry_type == CAMERA_SUBENTRY_TYPE
     }
+
+
+async def _async_flag_encrypted_without_code(
+    hass: HomeAssistant, entry: EzvizStreamConfigEntry, api: EzvizCloudApi
+) -> set[str]:
+    """
+    Repair-flag cameras that are encrypted but have no verification code stored.
+
+    Encryption can be toggled on (or the code rotated) after a camera is added, so a
+    camera may now report Image Encryption on while its subentry holds no code - its
+    live stream and recordings would then decode to garbage. For each such camera we
+    raise a repair issue (guiding the user to reconfigure and enter the code) and
+    return its serial so the camera entity marks itself unavailable. Cameras that are
+    fine get any stale issue cleared. A failure to fetch the camera list is
+    non-fatal - validation is skipped rather than blocking setup.
+    """
+    try:
+        cameras = {c.serial: c for c in await api.async_get_cameras()}
+    except Exception:  # noqa: BLE001 - a transient list failure must not block setup
+        _LOGGER.debug("Skipping encryption validation; camera list unavailable")
+        return set()
+
+    flagged: set[str] = set()
+    for subentry in entry.subentries.values():
+        if subentry.subentry_type != CAMERA_SUBENTRY_TYPE:
+            continue
+        serial = subentry.data[CONF_SERIAL]
+        code = subentry.data.get(CONF_VERIFICATION_CODE, "")
+        camera = cameras.get(serial)
+        issue_id = f"encrypted_no_code_{serial}"
+        if camera is not None and camera.is_encrypted and not code:
+            flagged.add(serial)
+            ir.async_create_issue(
+                hass,
+                DOMAIN,
+                issue_id,
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="encrypted_no_code",
+                translation_placeholders={"camera": subentry.title, "serial": serial},
+            )
+        else:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
+    return flagged
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: EzvizStreamConfigEntry) -> bool:
@@ -77,11 +131,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: EzvizStreamConfigEntry) 
         api=api,
         snapshot_semaphore=asyncio.Semaphore(max_snapshots),
         camera_subentries=_camera_subentries(entry),
+        encrypted_without_code=await _async_flag_encrypted_without_code(
+            hass, entry, api
+        ),
     )
     # Register the media view once per HA instance (serves every camera's stream).
     domain_data = hass.data.setdefault(DOMAIN, {})
     if "http" in hass.config.components and not domain_data.get(_VIEW_REGISTERED):
         hass.http.register_view(EzvizStreamMediaView(hass))
+        hass.http.register_view(EzvizReplayView(hass))
         domain_data[_VIEW_REGISTERED] = True
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     # Reload when a camera is added or reconfigured so its entity is (re)created.

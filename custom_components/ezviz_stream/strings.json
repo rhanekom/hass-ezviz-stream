@@ -34,10 +34,12 @@
         "title": "EZVIZ Stream options",
         "description": "Tune how this integration talks to the EZVIZ cloud.",
         "data": {
-          "max_concurrent_snapshots": "Max concurrent snapshot fetches"
+          "max_concurrent_snapshots": "Max concurrent snapshot fetches",
+          "enable_recordings": "Show cloud recordings in the media library"
         },
         "data_description": {
-          "max_concurrent_snapshots": "How many camera thumbnails may refresh from the cloud at the same time. 1 (the default) serialises them, which is safest against EZVIZ rate-limiting; raise it only if a multi-camera dashboard fills too slowly."
+          "max_concurrent_snapshots": "How many camera thumbnails may refresh from the cloud at the same time. 1 (the default) serialises them, which is safest against EZVIZ rate-limiting; raise it only if a multi-camera dashboard fills too slowly.",
+          "enable_recordings": "Off by default. When on, each camera's cloud recordings become browsable and playable under Media. The media library is broadly visible to Home Assistant users, so enabling this shares recordings with them."
         }
       }
     }
@@ -70,7 +72,8 @@
                 "thumbnail_mode": "Thumbnail source",
                 "snapshot_interval": "Thumbnail refresh interval (seconds)",
                 "stream": "Video stream",
-                "force_h264": "Transcode to H.264 (compatibility)"
+                "force_h264": "Transcode to H.264 (compatibility)",
+                "recordings_mode": "Cloud recordings in the media library"
               },
               "data_description": {
                 "thumbnail_mode": "How the camera tile is filled. Live snapshot refreshes on the interval below and wakes battery cameras. Latest motion image uses the most recent cloud motion snapshot with no wake. Static image shows the last frame from a live view and refreshes for free whenever you open the stream (it never wakes the camera on its own). 'Static, then newer motion images' keeps that static shot but shows any motion event newer than the last time you saved this camera - the battery default; save again to dismiss an unwanted image.",
@@ -94,7 +97,8 @@
                 "thumbnail_mode": "Thumbnail source",
                 "snapshot_interval": "Thumbnail refresh interval (seconds)",
                 "stream": "Video stream",
-                "force_h264": "Transcode to H.264 (compatibility)"
+                "force_h264": "Transcode to H.264 (compatibility)",
+                "recordings_mode": "Cloud recordings in the media library"
               },
               "data_description": {
                 "thumbnail_mode": "How the camera tile is filled. Live snapshot refreshes on the interval below and wakes battery cameras. Latest motion image uses the most recent cloud motion snapshot with no wake. Static image shows the last frame from a live view and refreshes for free whenever you open the stream (it never wakes the camera on its own). 'Static, then newer motion images' keeps that static shot but shows any motion event newer than the last time you saved this camera - the battery default; save again to dismiss an unwanted image.",
@@ -124,6 +128,12 @@
         "invalid_auth": "The account credentials are no longer valid. Reconfigure the account.",
         "reconfigure_successful": "Camera updated."
       }
+    }
+  },
+  "issues": {
+    "encrypted_no_code": {
+      "title": "{camera}: verification code needed",
+      "description": "**{camera}** ({serial}) has Image Encryption enabled but no verification code is configured, so its live stream and recordings can only decode to garbage. Reconfigure the camera and enter its 6-character verification code to restore it."
     }
   }
 }

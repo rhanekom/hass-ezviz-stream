@@ -1,13 +1,18 @@
+#!/usr/bin/env python3
 """
 Standalone diagnostic - stream a camera's Annex-B HEVC to stdout.
 
-Run manually as ``python -m custom_components.ezviz_stream.producer
---creds-file <path>`` with a JSON creds file (username/password/region/serial/
-stream) to verify the live cloud path outside HA (e.g. ``... | ffplay -``). This is
-a debugging tool only: the integration streams in-process via :mod:`broadcast` and
-serves MPEG-TS over HTTP (:mod:`stream_view`) - go2rtc rejects ``exec:`` sources via
-its API, so it is never run by go2rtc. RTP/HEVC (battery cams) only; encrypted
-MPEG-PS (IPC) needs continuous decryption + remux (C.2b).
+Verifies the live cloud path outside Home Assistant (e.g. pipe into ffplay). This
+is a debugging tool only: the integration streams in-process via
+``custom_components.ezviz_stream.broadcast`` and serves MPEG-TS over HTTP
+(``stream_view``) - go2rtc rejects ``exec:`` sources via its API, so it is never
+run by go2rtc. RTP/HEVC (battery cams) only; encrypted MPEG-PS (IPC) needs
+continuous decryption + remux.
+
+Credentials come from a JSON file (``username`` / ``password`` / ``region`` /
+``serial`` / optional ``stream``):
+
+    uv run python scripts/ezviz_producer.py --creds-file <path> | ffplay -
 """
 
 from __future__ import annotations
@@ -21,8 +26,12 @@ from typing import Any
 
 import aiohttp
 
-from .api import EzvizCloudApi
-from .stream import stream_annexb
+_REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO))
+sys.path.insert(0, str(_REPO / "scripts"))
+
+from custom_components.ezviz_stream.api import EzvizCloudApi  # noqa: E402
+from custom_components.ezviz_stream.stream import stream_annexb  # noqa: E402
 
 
 async def _run(creds: dict[str, Any]) -> int:
@@ -51,7 +60,7 @@ async def _run(creds: dict[str, Any]) -> int:
 
 def main() -> int:
     """Parse args and run the producer until stopped."""
-    parser = argparse.ArgumentParser(description="EZVIZ Stream go2rtc producer")
+    parser = argparse.ArgumentParser(description="EZVIZ Stream Annex-B producer")
     parser.add_argument("--creds-file", required=True)
     args = parser.parse_args()
     creds = json.loads(Path(args.creds_file).read_text())

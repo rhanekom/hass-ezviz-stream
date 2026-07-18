@@ -57,11 +57,24 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.21
     hooks:
+      # Format first, then lint: formatting can resolve some lint findings, and it
+      # keeps ruff from re-flagging layout the formatter is about to change.
+      - id: ruff-format
+        name: 🐍 ruff format
       - id: ruff
         name: 🐍 ruff lint
         args: [--fix, --exit-non-zero-on-fix]
-      - id: ruff-format
-        name: 🐍 ruff format
+
+  # Static type checking (config in pyproject.toml [tool.mypy], scoped to the
+  # package). Whole-package run, so run it once whenever any Python file is staged.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: 🔎 mypy
+        entry: uv run mypy
+        language: system
+        pass_filenames: false
+        files: \.py$
 
   # Markdown lint (config in .markdownlint.json).
   - repo: https://github.com/DavidAnson/markdownlint-cli2
@@ -84,6 +97,24 @@ repos:
       - id: actionlint-system
         name: 🤖 actionlint
 
+  # Schema-validate the .github config that actionlint's logic checks don't cover:
+  # workflow structure and dependabot.yml against their official JSON schemas.
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 0.37.4
+    hooks:
+      - id: check-github-workflows
+        name: 📐 check GitHub workflows
+      - id: check-dependabot
+        name: 📐 check Dependabot config
+
+  # GitHub Actions security auditing (complements actionlint): flags script
+  # injection via ${{ }}, unpinned/over-privileged actions, risky triggers.
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.27.0
+    hooks:
+      - id: zizmor
+        name: 🛡️ zizmor (Actions security)
+
   # Secret scanning (uses the gitleaks binary from the Dockerfile).
   # Pinned to v8.30.1 (newer than autoupdate's default-branch tag) to match the
   # Dockerfile binary. pass_filenames is overridden because the gitleaks-system
@@ -94,6 +125,15 @@ repos:
       - id: gitleaks-system
         name: 🔒 gitleaks
         pass_filenames: false
+
+  # Keep uv.lock in sync with pyproject.toml. Runs when either changes; fails if the
+  # lock is stale - important because pip-audit below audits the exported lock, so
+  # drift would mean auditing the wrong dependency set. Pinned to the installed uv.
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.11.28
+    hooks:
+      - id: uv-lock
+        name: 🔒 uv lock (sync with pyproject)
 
   # Dependency vulnerability scanning. Runs only when dependencies change, and
   # audits ONLY our runtime dependency tree ([project.dependencies], mirrored from

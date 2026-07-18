@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import struct
+from typing import Any
 
 # --- framing (reference.md B.1) --------------------------------------------- #
 MAGIC = 0x24
@@ -53,10 +54,11 @@ def _read_varint(data: bytes, i: int) -> tuple[int, int]:
         shift += 7
 
 
-def decode_protobuf(data: bytes) -> dict[int, list]:
+def decode_protobuf(data: bytes) -> dict[int, list[Any]]:
     """Decode a flat protobuf message into {field_number: [values]}."""
-    fields: dict[int, list] = {}
+    fields: dict[int, list[Any]] = {}
     i = 0
+    val: Any  # a varint int (wire 0) or the raw bytes of a length/fixed field
     while i < len(data):
         try:
             tag, i = _read_varint(data, i)
@@ -78,7 +80,7 @@ def decode_protobuf(data: bytes) -> dict[int, list]:
     return fields
 
 
-def field_str(fields: dict[int, list], fn: int) -> str | None:
+def field_str(fields: dict[int, list[Any]], fn: int) -> str | None:
     """Return field ``fn`` decoded as UTF-8 text, or None."""
     vals = fields.get(fn)
     if not vals or not isinstance(vals[0], bytes | bytearray):
@@ -168,14 +170,26 @@ def build_stream_url(
     stream: int = 1,
     biz: str = "",
     timestamp_ms: int | None = None,
+    time_range: tuple[str, str] | None = None,
 ) -> str:
-    """Build the ysproto live URL. ``stream`` selects the track (1=main, 2=sub).
+    """Build a ysproto stream URL. ``stream`` selects the track (1=main, 2=sub).
 
     ``timestamp_ms`` (epoch ms) is appended as ``&timestamp=`` when given - the
     proven client sends it, and the VTM echoes the query into the VTDU redirect.
+    ``time_range`` (``(begin, end)`` CAS timestamps) switches the path to ``/playback``
+    for SD-card recordings; without it the URL is a ``/live`` request (reference:
+    scripts/in/EzViz_Capture_Replay_SD.pcapng).
     """
     biz_part = f"&{biz}" if biz else ""
     ts_part = f"&timestamp={timestamp_ms}" if timestamp_ms is not None else ""
+    if time_range is not None:
+        begin, end = time_range
+        return (
+            f"ysproto://{ip}:{port}/playback?"
+            f"dev={serial}&chn={channel}&stream={stream}"
+            f"&begin={begin}&end={end}&serial={serial}&streamtag=NULL"
+            f"&cln={CLIENT_TYPE}&isp=0&auth=1&ssn={token}{biz_part}&vip=0&a=1{ts_part}"
+        )
     return (
         f"ysproto://{ip}:{port}/live?"
         f"dev={serial}&chn={channel}&stream={stream}&cln={CLIENT_TYPE}"

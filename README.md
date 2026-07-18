@@ -12,8 +12,9 @@ enabled.
 The official Home Assistant `ezviz` integration only shows live view over a camera's
 **local RTSP** stream. That leaves gaps: battery cameras run no persistent RTSP
 server, and any camera off Home Assistant's LAN can't be viewed. This integration
-reaches cameras the way the EZVIZ app does - over the cloud - so you can watch them in
-your dashboard, and it decrypts the video for cameras that have Image Encryption on.
+reaches cameras the way the EZVIZ app does - over the cloud - so you can watch them
+live in your dashboard and browse their recordings, and it decrypts the video for
+cameras that have Image Encryption on.
 
 > **This is a cloud integration.** Live view and snapshots go through EZVIZ's servers,
 > not your local network, and EZVIZ limits how much you can stream at once. Please read
@@ -27,6 +28,7 @@ your dashboard, and it decrypts the video for cameras that have Image Encryption
 | 🔋 **Battery cameras** | Streams battery cams, with battery-aware defaults (a no-wake motion-image thumbnail + sub stream) so they aren't woken just to fill a tile. |
 | 🔒 **Image Encryption** | Decrypts encrypted video on the fly, using the per-camera verification code. |
 | 🖼️ **Snapshots** | Pick the thumbnail source per camera (live snapshot, last cloud motion image, or a static frame); cached and kept across restarts. |
+| 🎞️ **Recordings & playback** | Browse and play a camera's **cloud** clips and recent **SD-card** segments from Home Assistant's media browser, decrypted on the fly (with audio where available). Off by default - opt in per account, override per camera. |
 | 🔌 **On-demand only** | A camera streams **only while someone is watching**, then stops - kind to batteries and to the EZVIZ cloud. |
 | ⚙️ **Set up from the UI** | Add, reconfigure, and re-authenticate cameras and the account from Settings; each save checks the settings by grabbing a real frame. |
 | 🏠 **Device-linked** | Camera entities attach to the same device as the official `ezviz` integration when it is installed. |
@@ -99,11 +101,22 @@ On the account, use **Add camera**:
           re-encodes the video continuously while the camera is watched, which is
           CPU-heavy (roughly a full core per 1080p camera) - enable it only on the
           cameras you need it for.
+        - **Cloud recordings in the media library** - per-camera override of the
+          account-level recordings setting (see [Account options](#account-options)):
+          *Default* (follow the account), *On*, or *Off*. Use it to expose or hide one
+          camera's recordings without changing the account default.
 
 When you save, the integration **grabs a real frame** to confirm the code and stream
 work. If it can't - a wrong code, or a battery camera that's asleep or briefly
 unreachable - it lets you **try again** or **save anyway**, so nothing that fails to
 stream is accepted silently.
+
+> **Where the camera appears.** If you also run the official `ezviz` integration,
+> this camera is attached to that camera's **existing device card** (it shares the
+> device's identity), so both live side by side rather than creating a duplicate
+> device. To tell them apart, our entity is named `"<device> Cloud"` (e.g. *Front
+> door Cloud*), while the official one keeps the plain device name. If the official
+> integration isn't installed, we create the device ourselves and work standalone.
 
 ### Changing a camera later
 
@@ -115,10 +128,36 @@ re-adding anything.
 
 ### Account options
 
-From the account's **Configure** action you can set **Max concurrent snapshot
-fetches** - how many camera thumbnails may refresh from the cloud at once. The default
-is **1** (serialised, safest against EZVIZ rate-limiting); raise it only if a
-multi-camera dashboard fills too slowly.
+From the account's **Configure** action you can set:
+
+- **Max concurrent snapshot fetches** - how many camera thumbnails may refresh from the
+  cloud at once. The default is **1** (serialised, safest against EZVIZ rate-limiting);
+  raise it only if a multi-camera dashboard fills too slowly.
+- **Show cloud recordings in the media library** - **off by default**. When on, every
+  camera on the account has its recordings browsable and playable under **Media** (a
+  per-camera *Cloud recordings in the media library* setting can override this either
+  way). Home Assistant's media library is broadly visible to its users, so turning this
+  on shares those recordings with them - see [Recordings](#recordings) below.
+
+## Recordings
+
+With recordings enabled (per account, or per camera), each camera appears under
+**Media → EZVIZ Recordings**, with two sources:
+
+- **Cloud recordings** - clips EZVIZ stored in the cloud (for example motion events on a
+  cloud-storage plan). Listing them is a plain cloud request and never wakes the camera.
+- **SD-card recordings** - segments recorded on the camera's own SD card over roughly the
+  last 24 hours.
+
+Selecting a clip streams it to the player as fragmented H.264 MP4, decrypted on the fly
+for cameras with Image Encryption (using the same verification code as live view) and
+with audio where it can be decoded. This is net-add over the official `ezviz`
+integration, which has no recordings or playback.
+
+> **Privacy.** Recordings are **off by default** because Home Assistant's media library
+> is visible to all its users. Enable it only if you're comfortable sharing those clips
+> with everyone who can open your Home Assistant, and use the per-camera override to keep
+> individual cameras out.
 
 ## How it works
 

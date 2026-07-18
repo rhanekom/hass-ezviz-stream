@@ -51,11 +51,13 @@ from .api import (
 from .camera import persist_snapshot
 from .const import (
     CAMERA_SUBENTRY_TYPE,
+    CONF_ENABLE_RECORDINGS,
     CONF_FORCE_H264,
     CONF_IS_BATTERY,
     CONF_IS_ENCRYPTED,
     CONF_MAX_SNAPSHOTS,
     CONF_MOTION_THUMBNAIL,
+    CONF_RECORDINGS_MODE,
     CONF_REGION,
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
@@ -64,8 +66,10 @@ from .const import (
     CONF_STREAM,
     CONF_THUMBNAIL_MODE,
     CONF_VERIFICATION_CODE,
+    DEFAULT_ENABLE_RECORDINGS,
     DEFAULT_FORCE_H264,
     DEFAULT_MAX_SNAPSHOTS,
+    DEFAULT_RECORDINGS_MODE,
     DEFAULT_REGION,
     DEFAULT_SNAPSHOT_INTERVAL,
     DEFAULT_SNAPSHOT_INTERVAL_BATTERY,
@@ -75,6 +79,9 @@ from .const import (
     MAX_MAX_SNAPSHOTS,
     MAX_SNAPSHOT_INTERVAL,
     MIN_SNAPSHOT_INTERVAL,
+    RECORDINGS_MODE_DEFAULT,
+    RECORDINGS_MODE_OFF,
+    RECORDINGS_MODE_ON,
     REGION_API_CODES,
     SUB_STREAM,
     THUMBNAIL_INTERVAL,
@@ -111,22 +118,22 @@ def _camera_options_schema(  # noqa: PLR0913 - one form field per editable setti
     snapshot_interval: int,
     stream: int,
     force_h264: bool,
+    recordings_mode: str,
 ) -> vol.Schema:
     """
     Build the schema for a camera's editable settings (add + reconfigure).
 
-    The verification code is shown up front unless the device is *definitively*
-    unencrypted (``is_encrypted`` is False) - then it is hidden, since no code is
-    needed; it stays visible (and required) when encryption is on, and visible
-    (optional) when the status is unknown. The thumbnail source, refresh interval,
-    and stream (all with sensible defaults) live in a collapsed 'advanced' section.
+    The verification code is always shown. It is *required* when encryption is on,
+    and *optional* otherwise (unencrypted or unknown status) - an unencrypted camera
+    still accepts a code so older recordings from a period when encryption was enabled
+    can be decrypted (see ``_code_hint``). The thumbnail source, refresh interval, and
+    stream (all with sensible defaults) live in a collapsed 'advanced' section.
     """
     schema: dict[Any, Any] = {}
-    if is_encrypted is not False:  # show unless we know it is unencrypted
-        code_key = vol.Required if is_encrypted else vol.Optional
-        schema[code_key(CONF_VERIFICATION_CODE, default=verification_code)] = (
-            TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
-        )
+    code_key = vol.Required if is_encrypted else vol.Optional
+    schema[code_key(CONF_VERIFICATION_CODE, default=verification_code)] = TextSelector(
+        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+    )
     schema[vol.Required(_ADVANCED)] = section(
         vol.Schema(
             {
@@ -178,6 +185,27 @@ def _camera_options_schema(  # noqa: PLR0913 - one form field per editable setti
                     )
                 ),
                 vol.Required(CONF_FORCE_H264, default=force_h264): BooleanSelector(),
+                vol.Required(
+                    CONF_RECORDINGS_MODE, default=recordings_mode
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(
+                                value=RECORDINGS_MODE_DEFAULT,
+                                label="Use account default",
+                            ),
+                            SelectOptionDict(
+                                value=RECORDINGS_MODE_ON,
+                                label="Show recordings in media library",
+                            ),
+                            SelectOptionDict(
+                                value=RECORDINGS_MODE_OFF,
+                                label="Hide recordings from media library",
+                            ),
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
             }
         ),
         {"collapsed": True},
@@ -226,6 +254,9 @@ def _camera_subentry_data(
         ),
         CONF_STREAM: int(user_input[CONF_STREAM]),
         CONF_FORCE_H264: bool(user_input.get(CONF_FORCE_H264, DEFAULT_FORCE_H264)),
+        CONF_RECORDINGS_MODE: user_input.get(
+            CONF_RECORDINGS_MODE, DEFAULT_RECORDINGS_MODE
+        ),
     }
     if is_battery is not None:  # omit when unknown rather than store a null
         data[CONF_IS_BATTERY] = is_battery
@@ -249,19 +280,26 @@ def _code_hint(is_encrypted: bool | None) -> str:  # noqa: FBT001 - display form
     """
     Verification-code sentence for the form description, matching the code field.
 
-    Empty when the field is hidden (definitively unencrypted), so the description
-    never tells the user to enter a code that is not shown.
+    The field is always shown; when the camera is unencrypted the code is optional but
+    still useful, so the hint explains it lets older recordings (from a time when
+    Image Encryption was on) be decrypted.
     """
     if is_encrypted is False:
-        return ""
+        return (
+            "This camera is not encrypted, so the code is optional. Enter its "
+            "verification code (the 6-character code on the camera label) only if "
+            "Image Encryption was ever enabled, so recordings from that period can "
+            "still be played; leave blank otherwise. "
+        )
     if is_encrypted:
         return (
             "This camera has Image Encryption on - enter its verification code "
             "(the 6-character code on the camera label). "
         )
     return (
-        "If this camera has Image Encryption on, enter its verification code (the "
-        "6-character code on the camera label); leave blank otherwise. "
+        "If this camera has Image Encryption on - or ever did - enter its "
+        "verification code (the 6-character code on the camera label), so its "
+        "recordings can be decrypted; leave blank otherwise. "
     )
 
 
@@ -420,11 +458,17 @@ class EzvizStreamOptionsFlow(OptionsFlow):
         if user_input is not None:
             # NumberSelector yields a float; store an int for a clean semaphore size.
             return self.async_create_entry(
-                data={CONF_MAX_SNAPSHOTS: int(user_input[CONF_MAX_SNAPSHOTS])}
+                data={
+                    CONF_MAX_SNAPSHOTS: int(user_input[CONF_MAX_SNAPSHOTS]),
+                    CONF_ENABLE_RECORDINGS: user_input[CONF_ENABLE_RECORDINGS],
+                }
             )
 
         current = self.config_entry.options.get(
             CONF_MAX_SNAPSHOTS, DEFAULT_MAX_SNAPSHOTS
+        )
+        recordings = self.config_entry.options.get(
+            CONF_ENABLE_RECORDINGS, DEFAULT_ENABLE_RECORDINGS
         )
         return self.async_show_form(
             step_id="init",
@@ -438,6 +482,9 @@ class EzvizStreamOptionsFlow(OptionsFlow):
                             mode=NumberSelectorMode.BOX,
                         )
                     ),
+                    vol.Required(
+                        CONF_ENABLE_RECORDINGS, default=recordings
+                    ): BooleanSelector(),
                 }
             ),
         )
@@ -546,6 +593,7 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
                 ),
                 stream=SUB_STREAM if battery else DEFAULT_STREAM,
                 force_h264=DEFAULT_FORCE_H264,
+                recordings_mode=DEFAULT_RECORDINGS_MODE,
             ),
             errors=errors,
             description_placeholders={
@@ -605,6 +653,9 @@ class CameraSubentryFlowHandler(ConfigSubentryFlow):
                 snapshot_interval=_stored_interval(subentry.data),
                 stream=subentry.data.get(CONF_STREAM, DEFAULT_STREAM),
                 force_h264=subentry.data.get(CONF_FORCE_H264, DEFAULT_FORCE_H264),
+                recordings_mode=subentry.data.get(
+                    CONF_RECORDINGS_MODE, DEFAULT_RECORDINGS_MODE
+                ),
             ),
             errors=errors,
             description_placeholders={

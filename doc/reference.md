@@ -650,6 +650,29 @@ still images are **AES-CBC, fixed IV, whole payload, envelope + hash**. Same
 verification-code-derived key family, different mode and framing - so a still-image
 decryptor is a **new, small helper**, not reusable from `decrypt.py`.
 
+#### B.10.3 Audio (AAC) encryption (verified 2026-07-17)
+
+The **audio** track of an encrypted stream is encrypted the same way as video, keyed
+on the same verification code - only the "clear framing header" differs:
+
+- Each audio PES (`C0`-`DF`) carries **one ADTS AAC frame** (its `frame_length` equals
+  the PES payload length). The **ADTS header stays clear** - 7 bytes normally, 9 when
+  the CRC-present bit (`byte1 & 0x01 == 0`) is set - and the **AAC body after it is
+  AES-ECB encrypted** (whole 16-byte blocks; a trailing partial block stays clear).
+- Unlike video, it is **per-frame**, not accumulated across PES: each frame's body is
+  its own independent ECB region (the ADTS header is the per-frame clear prefix, the
+  audio analogue of `nalu_header_size`). No 4096-byte cap (frames are far smaller).
+- Same AES-ECB key as video (verification code, zero-padded/truncated to 16 B).
+- **How it was cracked:** the Deck-camera trace
+  `EzViz_Capture_Replay_SD_Unec_Enc.pcapng` - the verification code decrypts the Deck
+  **video** cleanly (proving the key), then audio with ECB + clear ADTS header decodes
+  with **0 errors over 657 frames / 3 sessions**. Implemented as
+  `decrypt_stream.decrypt_ps_audio`; `StreamingPsDecryptor(decrypt_audio=True)` applies
+  it after the video pass (default off preserves the video oracle invariant).
+- **Gotcha:** an audio-PES scanner must advance past each PES by its length; skipping
+  only a few bytes lets it scan **into** a video payload and misread Annex-B NAL start
+  codes as audio PES. Cameras with audio disabled have no audio PES - it is a no-op.
+
 ### B.11 Operational realities
 
 - **Battery cameras sleep.** The *first* stream request often returns few/zero
@@ -885,3 +908,92 @@ identifier) because it is the clean public-API path and works standalone. We do
 integration's private runtime data. The config flow may optionally enumerate
 existing EZVIZ devices from the public registries to pre-fill the serial picker -
 a convenience, not a requirement.
+
+## Part E - Recordings & playback (verified 2026-07-17)
+
+Two independent recording sources, both reusing the existing decode/decrypt/serve
+tail (channel-0x01 MPEG-PS -> `StreamingPsDecryptor` -> ffmpeg H.264 fMP4). Surfaced
+in HA's media library via a `media_source` platform (root -> camera -> Cloud / SD
+subfolders) and served by a token-guarded replay view; exposure is opt-in per account
+(`enable_recordings`, off by default) with a per-camera override.
+
+### E.1 Cloud recordings (cloud-replay, TLS)
+
+- **List:** `GET /v3/clouds/videos/list` (`deviceSerial`, `channelNo`, `limit`,
+  `videoType=2`) -> `videos[]` with `seqId`, `startTime`/`stopTime`, `fileSize`,
+  `crypt`, `keyChecksum`, `streamUrl` (`host:port`), `storageVersion`, `videoLong`.
+  Precise ms start is in the `coverPic` URL's `startTime` query param. Optionally
+  enrich via `POST /v3/clouds/videoDetails`.
+- **Ticket:** `GET /v3/cameras/ticketInfo` -> `ticketInfo.ticket`.
+- **Transport:** a **separate TLS socket** (NOT ysproto) to `streamUrl`. 32-byte frame
+  header `>IIIIIIII` (magic `0x9EBAACE9`, ver 1, seq, 0, cmd, 0, len, 0) + XML + MD5.
+  OPEN cmd `0x5003` with a `<Request>` XML (Token=ticket, PlayType=2, File Id=seqId,
+  Time Begin/End in CAS, CameraInfo SubSerial=`{serial}_{channel}`); HB cmd `0x5010`
+  every 5 s; server frames carry `data_type` 0/1/2 = media, 100 = EOF; the server may
+  also just close the socket to end. Payload is encrypted MPEG-PS. Ported from
+  `pyezvizapi.stream.download_ezviz_cloud_replay` into `cloud_replay.py`.
+- **Container:** an 80-byte "IMKH" (Hikvision) header precedes standard MPEG-PS;
+  ffmpeg's PS demuxer resyncs past it (first pack `000001BA` at offset 80).
+
+### E.2 SD-card recordings (LAN, ysproto `/playback`)
+
+- **List:** `GET /v3/streaming/v2/records` (`deviceSerial`, `channelNo`, `startTime`,
+  `stopTime`, `size`, `sortBy=0`, `requireLabel=0`). **Time format is UTC
+  `"%Y-%m-%d %H:%M:%S"`** - epoch ms / epoch s / CAS all return a device exception
+  (`meta.code 2004`, `DEVICE_EXCEPTION 61`). Records carry `begin`/`end` (or
+  `startTime`/`stopTime`); the list may be **base64+zlib** JSON under `records`.
+- **Transport:** the **same ysproto handshake as live** (Part B), differing only in the
+  stream URL: path `/playback` with an added CAS time range, e.g.
+  `ysproto://<vtm>/playback?dev=..&chn=1&stream=2&begin=<CAS>&end=<CAS>&serial=..&streamtag=NULL&..&ssn=<token>&biz=1&a=1&timestamp=..`.
+  Everything else matches `/live`. A finite session: the VTDU closes at clip end (no
+  reconnect). `stream.iter_playback_ps` + `ysproto.build_stream_url(time_range=...)`.
+- **CAS time** = `"%Y%m%dT%H%M%SZ"` (same as cloud begin/end).
+- **Clock skew:** camera clocks can run **ahead** of real time (observed ~15 min), so
+  a just-recorded segment is timestamped in the near future; list windows must extend
+  past "now" (we add +1 h) or recent footage is missed.
+
+### E.3 Audio in recordings
+
+Audio is ADTS AAC-LC (16 kHz mono observed). Plaintext on an unencrypted camera;
+on an encrypted one the AAC body is AES-encrypted with a clear ADTS header - see
+**B.10.3**. The replay view decrypts it (encrypted) or copies it (plaintext) and
+always serves it; audio-disabled cameras (no audio PES) are a no-op.
+
+### E.4 Mixed / rotated keys and robust serving (verified 2026-07-17)
+
+- **Per-clip decryption auto-detect (`broadcast.maybe_decrypt_replay`).** A camera's
+  Image Encryption can be toggled or its code rotated over time, so one camera's clips
+  are a mix of plaintext, current-key, and old-key. The per-clip `crypt` /
+  per-camera `is_encrypted` flags reflect the *current* setting, not the clip's - so
+  decrypting on the flag corrupts plaintext clips. Instead the replay view fetches the
+  **raw** clip (`verification_code=""`) and wraps it: buffer the first keyframe
+  (`_PROBE_BYTES` 768 KB), decode-probe it raw vs decrypted with a short ffmpeg
+  (`_probe_frame_count`, counts frames from `-progress`; garbage ~0, valid >=2), then
+  stream raw (plaintext), decrypted (current key), or raw+warn (old/unknown key). A
+  NAL-header heuristic can't do this: HEVC keeps the 2-byte NAL header clear on both
+  plaintext and encrypted, so only the body differs (needs decoding to tell apart).
+  Old-key clips are unrecoverable without that key. The probe process is reaped via
+  `_terminate` in a `finally` (an orphaned asyncio subprocess transport raises in
+  `__del__` on Python 3.14 when GC'd off the loop thread).
+- **Drop undecodable audio (`_probe_audio_encodable`).** The fragmented-MP4 muxer
+  writes *nothing at all* if a mapped output stream never gets a packet, so a bad audio
+  track sinks the (good) video: the AAC encoder fails (`-22`) and ffmpeg emits only the
+  init segment. `_prepare_replay` probes whether the served sample's audio can be
+  AAC-encoded and passes `audio=` to the transcode accordingly - dropping audio
+  (`-an`) when it is absent, corrupt, or encrypted-with-a-key-we-lack. Observed on
+  Front Door **cloud** clips: the decrypted audio is garbage (`sample_rate=0`) even
+  though the video decrypts perfectly - so cloud audio decryption for some cameras is
+  an open follow-up, but playback is video-only rather than failing outright. (Audio
+  decrypt is validated on Deck **SD**; the cloud path differs.)
+- **Keyframe cap on the transcode (`mp4_replay_source -g 30`).** `frag_keyframe`
+  flushes an MP4 fragment only at a keyframe; libx264's default 250-frame GOP means a
+  short/static clip (no scene-cut keyframe) produces one fragment never flushed until
+  EOF, so a live-streamed clip delivers only the init segment and never starts in the
+  browser. `-g 30` (~1-2 s) makes fragments flush regularly - a clip with motion
+  happened to work via a scene-cut IDR, which is why it looked clip-specific.
+- **Config flow:** the verification-code field is always shown - Required when
+  encrypted, Optional otherwise - so an unencrypted camera can still be given a code to
+  decrypt older clips from an encrypted period (`_code_hint` wording).
+- **Load validation:** on every (re)load, a camera reporting encrypted with no stored
+  code is marked unavailable and raises an `encrypted_no_code` repair issue
+  (`__init__._async_flag_encrypted_without_code`), instead of serving undecodable video.

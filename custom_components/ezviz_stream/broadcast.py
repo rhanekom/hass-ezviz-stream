@@ -16,26 +16,43 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 from typing import TYPE_CHECKING
 
+from .decrypt_stream import StreamingPsDecryptor, decrypt_ps_audio, decrypt_ps_video
 from .stream import iter_annexb, iter_ps_decrypted
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
     from .api import EzvizCloudApi
 
 _LOGGER = logging.getLogger(__name__)
 
+_STDIN_PIPE = "pipe:0"  # FFmpeg reads its input from stdin
+_STDOUT_PIPE = "pipe:1"  # FFmpeg writes its muxed output to stdout
 _TS_READ = 65536  # bytes per read from FFmpeg's MPEG-TS output
 _QUEUE_MAX = 512  # per-subscriber backlog; a slow consumer drops its oldest chunks
 _FFMPEG_TERM_TIMEOUT = 5.0
+# After a session that produced no media (camera offline/unreachable, DNS/cloud error),
+# refuse to start a new one for this long. HA's stream component re-pulls our view URL
+# on a backoff for as long as a consumer is attached, even for a camera that cannot
+# stream; without this each re-pull would re-run a full cloud handshake storm. A
+# productive session clears it, so a camera coming back online recovers on the next
+# pull once the window passes. Battery cams are covered too: a wake attempt runs the
+# full bounded reconnect first, and only a session that woke nothing trips the cooldown.
+_OFFLINE_COOLDOWN = 120.0
 # Playback pacing (see _Pacer): the RTP timestamp is a 90 kHz clock; a step that is
 # negative or larger than this (2 s) means a discontinuity - a reconnect's fresh RTP
 # base or a 32-bit wrap - so we rebase the schedule to "now" instead of replaying it.
 _RTP_CLOCK = 90000
 _RTP_DISCONTINUITY = 2 * _RTP_CLOCK
 _MAX_PACE_SLEEP = 2.0  # safety cap on a single wait, so a bad timestamp can't stall us
+
+# Per-clip decryption auto-detection (see maybe_decrypt_replay).
+_PROBE_BYTES = 768 * 1024  # buffer roughly one keyframe before deciding
+_PROBE_FRAMES = 24  # cap the decode probe; a valid interpretation reaches this easily
+_PROBE_MIN_FRAMES = 2  # garbage decodes ~0 frames, cleanly separating it from valid
 
 
 async def _spawn_ffmpeg(
@@ -53,7 +70,7 @@ async def _spawn_ffmpeg(
     args = [ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer"]
     if wallclock:
         args += ["-use_wallclock_as_timestamps", "1"]
-    args += ["-f", input_fmt, "-i", "pipe:0"]
+    args += ["-f", input_fmt, "-i", _STDIN_PIPE]
     if transcode:
         # ultrafast/zerolatency keep encode latency and CPU as low as a live H.264
         # encode allows; -g 30 caps the keyframe gap (~2 s at 15 fps) for quick player
@@ -74,7 +91,7 @@ async def _spawn_ffmpeg(
         ]
     else:
         args += ["-c", "copy"]
-    args += ["-f", "mpegts", "pipe:1"]
+    args += ["-f", "mpegts", _STDOUT_PIPE]
     return await asyncio.create_subprocess_exec(
         *args,
         stdin=asyncio.subprocess.PIPE,
@@ -135,6 +152,265 @@ async def mpegts_source(  # noqa: PLR0913 - one live source needs api, camera + 
         with contextlib.suppress(asyncio.CancelledError):
             await feeder
         await _terminate(ffmpeg)
+
+
+async def mp4_replay_source(
+    ffmpeg_bin: str, ps_source: AsyncIterator[bytes], *, audio: bool = False
+) -> AsyncIterator[bytes]:
+    """
+    Transcode a decrypted recording MPEG-PS clip to fragmented H.264 MP4.
+
+    ``ps_source`` is the decrypted MPEG-PS from a cloud
+    (:func:`cloud_replay.iter_cloud_replay_ps`) or SD (:func:`stream.iter_playback_ps`)
+    recording. ffmpeg re-encodes the video HEVC->H.264 (browser-universal) into a
+    fragmented MP4 that streams progressively to a browser ``<video>``. ``audio``
+    re-encodes the clip's AAC track (plaintext on an unencrypted camera, decrypted
+    upstream on an encrypted one); it is a no-op when the camera has audio disabled
+    (no audio stream). Runs until ``ps_source`` is exhausted; ffmpeg is torn down on
+    exit.
+
+    ``-g 30`` caps the keyframe interval (~1-2 s). ``frag_keyframe`` flushes an MP4
+    fragment only at each keyframe, so without this cap libx264's default 250-frame
+    GOP means a short or static clip (no scene-cut keyframe) produces a single
+    fragment that is never flushed until EOF - the browser only ever receives the
+    init segment and playback never starts. The cap makes fragments flush regularly
+    so progressive playback works for every clip.
+    """
+    audio_args = ["-c:a", "aac"] if audio else ["-an"]
+    ffmpeg = await asyncio.create_subprocess_exec(
+        ffmpeg_bin,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "mpeg",
+        "-i",
+        _STDIN_PIPE,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-tune",
+        "zerolatency",
+        "-pix_fmt",
+        "yuv420p",
+        "-g",
+        "30",
+        *audio_args,
+        "-movflags",
+        "frag_keyframe+empty_moov+default_base_moof",
+        "-f",
+        "mp4",
+        _STDOUT_PIPE,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    assert ffmpeg.stdin is not None  # noqa: S101 - PIPE guarantees a writer
+    assert ffmpeg.stdout is not None  # noqa: S101 - PIPE guarantees a reader
+    stdin = ffmpeg.stdin
+
+    async def _feed() -> None:
+        try:
+            async for chunk in ps_source:
+                stdin.write(chunk)
+                await stdin.drain()
+        except BrokenPipeError, ConnectionResetError:
+            pass  # ffmpeg exited; the reader side will see EOF and clean up
+        finally:
+            with contextlib.suppress(OSError):
+                stdin.close()
+
+    feeder = asyncio.create_task(_feed())
+    try:
+        while True:
+            chunk = await ffmpeg.stdout.read(_TS_READ)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        feeder.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await feeder
+        await _terminate(ffmpeg)
+
+
+async def _probe_frame_count(ffmpeg_bin: str, ps: bytes) -> int:
+    """
+    Return how many video frames FFmpeg decodes from an MPEG-PS ``ps`` sample.
+
+    A valid interpretation of the sample decodes many frames (capped at
+    :data:`_PROBE_FRAMES`); garbage (wrong/absent decryption) decodes ~0. Audio is
+    ignored (``-an``) so an undecryptable audio track cannot mask the video verdict.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg_bin,
+        "-hide_banner",
+        "-v",
+        "error",
+        "-f",
+        "mpeg",
+        "-i",
+        _STDIN_PIPE,
+        "-map",
+        "0:v:0",
+        "-an",
+        "-frames:v",
+        str(_PROBE_FRAMES),
+        "-f",
+        "null",
+        "-",
+        "-progress",
+        _STDOUT_PIPE,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        out, _ = await proc.communicate(ps)
+    except BrokenPipeError, ConnectionResetError:
+        return 0
+    finally:
+        # Always reap the probe process so its subprocess transport is closed on this
+        # loop. Left to GC (e.g. when the clip is abandoned mid-probe), the transport's
+        # __del__ can run on another thread and raise on Python 3.14.
+        await _terminate(proc)
+    matches = re.findall(rb"frame=\s*(\d+)", out)
+    return int(matches[-1]) if matches else 0
+
+
+async def _probe_audio_encodable(ffmpeg_bin: str, ps: bytes) -> bool:
+    """
+    Return whether the sample's audio track can actually be AAC-encoded.
+
+    False when the clip has no audio stream, or its audio is undecodable - a corrupt
+    recording, or encrypted audio we can't decrypt (wrong/old key). This matters
+    because the fragmented-MP4 muxer writes **nothing at all** if a mapped output
+    stream never receives a packet, so a broken audio track would otherwise sink the
+    (good) video. Callers drop audio (``-an``) when this is False. Mirrors what
+    :func:`mp4_replay_source` does (decode the AAC and re-encode it), so a pass here
+    means the real transcode's audio will produce packets.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg_bin,
+        "-hide_banner",
+        "-v",
+        "error",
+        "-f",
+        "mpeg",
+        "-i",
+        _STDIN_PIPE,
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-c:a",
+        "aac",
+        "-f",
+        "null",
+        "-",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        await proc.communicate(ps)
+    except BrokenPipeError, ConnectionResetError:
+        return False
+    finally:
+        await _terminate(proc)  # reap on this loop; never leave it to GC
+    return proc.returncode == 0
+
+
+async def _prepare_replay(
+    ffmpeg_bin: str,
+    raw_source: AsyncIterator[bytes],
+    verification_code: str,
+) -> tuple[bool, AsyncIterator[bytes]]:
+    """
+    Buffer the first keyframe, decide how to serve the clip, return (audio_ok, source).
+
+    Two per-clip decisions come out of one buffered sample:
+
+    * **Decrypt or not.** A camera's verification code can change over its life
+      (encryption toggled, or the code rotated), so one camera's clips may be a mix of
+      plaintext, current-key and old-key - the ``crypt`` / ``is_encrypted`` flags only
+      describe the *current* setting. Decrypting on the flag corrupts plaintext clips,
+      so we decode-probe the sample raw vs decrypted and pick whichever yields valid
+      video (raw -> plaintext, decrypted -> encrypted, neither -> old/unknown key,
+      logged and served raw best-effort).
+    * **Keep audio or not.** ``audio_ok`` is False when the clip's audio can't be
+      AAC-encoded (absent, corrupt, or encrypted-with-a-key-we-lack); the transcode
+      then drops audio so it can't sink the video (see :func:`_probe_audio_encodable`).
+
+    ``ps_source`` replays the buffered sample then the rest of ``raw_source``,
+    decrypted or not per the decision.
+    """
+    buffer = bytearray()
+    exhausted = True
+    async for chunk in raw_source:
+        buffer += chunk
+        if len(buffer) >= _PROBE_BYTES:
+            exhausted = False
+            break
+    sample = bytes(buffer)
+
+    decrypt = False
+    served = sample
+    if verification_code and await _probe_frame_count(ffmpeg_bin, sample) < (
+        _PROBE_MIN_FRAMES
+    ):
+        video = await asyncio.to_thread(decrypt_ps_video, sample, verification_code)
+        decrypted = await asyncio.to_thread(decrypt_ps_audio, video, verification_code)
+        if await _probe_frame_count(ffmpeg_bin, decrypted) >= _PROBE_MIN_FRAMES:
+            decrypt, served = True, decrypted
+        else:
+            _LOGGER.warning(
+                "Recording clip decoded neither raw nor decrypted - it was likely "
+                "recorded with a different encryption code than the one configured; "
+                "serving it undecrypted (playback may fail)",
+            )
+    audio_ok = await _probe_audio_encodable(ffmpeg_bin, served)
+
+    async def _ps_source() -> AsyncGenerator[bytes]:
+        if not decrypt:
+            yield sample
+            if not exhausted:
+                async for chunk in raw_source:
+                    yield chunk
+            return
+        decryptor = StreamingPsDecryptor(verification_code, decrypt_audio=True)
+        first = await asyncio.to_thread(decryptor.feed, sample)
+        if first:
+            yield first
+        if not exhausted:
+            async for chunk in raw_source:
+                out = await asyncio.to_thread(decryptor.feed, chunk)
+                if out:
+                    yield out
+        tail = await asyncio.to_thread(decryptor.flush)
+        if tail:
+            yield tail
+
+    return audio_ok, _ps_source()
+
+
+async def replay_mp4_source(
+    ffmpeg_bin: str,
+    raw_source: AsyncIterator[bytes],
+    verification_code: str,
+) -> AsyncGenerator[bytes]:
+    """
+    Serve one recording as fragmented H.264 MP4: decrypt per-clip, drop bad audio.
+
+    Thin wrapper that runs :func:`_prepare_replay` (per-clip decrypt + audio decision)
+    and feeds the result to :func:`mp4_replay_source` with the chosen ``audio`` flag.
+    This is the entry point the replay view uses for both cloud and SD clips.
+    """
+    audio_ok, ps_source = await _prepare_replay(
+        ffmpeg_bin, raw_source, verification_code
+    )
+    async for chunk in mp4_replay_source(ffmpeg_bin, ps_source, audio=audio_ok):
+        yield chunk
 
 
 def _s32(value: int) -> int:
@@ -233,6 +509,10 @@ async def _terminate(ffmpeg: asyncio.subprocess.Process) -> None:
     if ffmpeg.returncode is None:
         with contextlib.suppress(ProcessLookupError):
             ffmpeg.kill()
+        # Reap after the kill so the subprocess transport is closed on this loop;
+        # left unreaped, its __del__ can run off-loop under GC and raise on 3.14.
+        with contextlib.suppress(Exception):
+            await ffmpeg.wait()
 
 
 class CameraBroadcast:
@@ -244,13 +524,14 @@ class CameraBroadcast:
         self._subscribers: set[asyncio.Queue[bytes | None]] = set()
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        self._offline_until = 0.0  # monotonic deadline; see _OFFLINE_COOLDOWN
 
     @property
     def is_running(self) -> bool:
         """True while an upstream session is live (something is being served)."""
         return self._task is not None and not self._task.done()
 
-    async def subscribe(self, *, start_if_idle: bool = True) -> AsyncIterator[bytes]:
+    async def subscribe(self, *, start_if_idle: bool = True) -> AsyncGenerator[bytes]:
         """
         Yield MPEG-TS chunks for one consumer, sharing the single upstream session.
 
@@ -261,8 +542,14 @@ class CameraBroadcast:
         """
         queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=_QUEUE_MAX)
         async with self._lock:
-            if not self.is_running and not start_if_idle:
-                return  # nothing is streaming; do not start a session just to tap it
+            if not self.is_running:
+                if not start_if_idle:
+                    return  # nothing is streaming; do not start a session to tap it
+                if asyncio.get_running_loop().time() < self._offline_until:
+                    # Recently gave up on a camera that streamed nothing; do not open
+                    # another cloud session until the cooldown passes (see _run).
+                    _LOGGER.debug("offline cooldown active; not starting a session")
+                    return
             self._subscribers.add(queue)
             if self._task is None or self._task.done():
                 self._task = asyncio.create_task(self._run())
@@ -294,15 +581,39 @@ class CameraBroadcast:
 
     async def _run(self) -> None:
         """Pull the upstream source and push each chunk to every subscriber."""
+        source = self._source_factory()
+        produced = False
+        cancelled = False
         try:
-            async for chunk in self._source_factory():
+            async for chunk in source:
+                produced = True
                 for queue in self._subscribers:
                     _offer(queue, chunk)
         except asyncio.CancelledError:
+            cancelled = True
             raise
         except Exception:
             _LOGGER.exception("broadcast upstream for camera failed")
         finally:
+            # Close the source on this loop so its FFmpeg is reaped now (mpegts_source's
+            # own finally -> _terminate) rather than left to GC, whose __del__ can run
+            # off-loop and raise on Python 3.14. The declared type is AsyncIterator (no
+            # aclose); the concrete source is an async generator, so close it when able.
+            aclose = getattr(source, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(Exception):
+                    await aclose()
+            # A session that ended on its own without any media means the camera could
+            # not stream (offline/unreachable/error); hold off new sessions for a while
+            # so HA re-pulling the URL does not restart the handshake storm. A
+            # productive session clears the cooldown; a cancelled one (subscriber left)
+            # is not a failure signal, so it leaves the cooldown untouched.
+            if produced:
+                self._offline_until = 0.0
+            elif not cancelled:
+                self._offline_until = (
+                    asyncio.get_running_loop().time() + _OFFLINE_COOLDOWN
+                )
             for queue in self._subscribers:
                 _offer(queue, None)  # signal end-of-stream to consumers
 

@@ -67,7 +67,7 @@ _SNAPSHOT_DIR = "ezviz_stream"
 _SNAPSHOT_FILE_MODE = 0o600
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Mapping
 
     from homeassistant.config_entries import ConfigSubentry
     from homeassistant.core import HomeAssistant
@@ -77,7 +77,7 @@ if TYPE_CHECKING:
     from .api import EzvizCamera, MotionImage
 
 
-def _resolve_interval(data: dict[str, object]) -> float:
+def _resolve_interval(data: Mapping[str, object]) -> float:
     """Resolve a camera's snapshot cache TTL from its subentry data (seconds)."""
     if CONF_SNAPSHOT_INTERVAL in data:
         return float(data[CONF_SNAPSHOT_INTERVAL])  # type: ignore[arg-type]
@@ -87,7 +87,7 @@ def _resolve_interval(data: dict[str, object]) -> float:
     return float(DEFAULT_SNAPSHOT_INTERVAL)
 
 
-def _resolve_thumbnail_mode(data: dict[str, object]) -> str:
+def _resolve_thumbnail_mode(data: Mapping[str, object]) -> str:
     """Resolve the thumbnail source, mapping the legacy boolean when needed."""
     if mode := data.get(CONF_THUMBNAIL_MODE):
         return str(mode)
@@ -165,7 +165,10 @@ class EzvizStreamCamera(Camera):
     """A cloud-streamed EZVIZ camera (one per subentry)."""
 
     _attr_has_entity_name = True
-    _attr_name = None  # the camera is its own device; use the device name
+    # Sub-name so we compose to "<device> Cloud" and don't collide with the
+    # official `ezviz` camera, which is the nameless primary entity on the same
+    # device card (§6.3). Standalone, "<device> Cloud" is harmlessly redundant.
+    _attr_name = "Cloud"
     _attr_supported_features = CameraEntityFeature.STREAM
 
     def __init__(self, entry: EzvizStreamConfigEntry, subentry: ConfigSubentry) -> None:
@@ -242,8 +245,13 @@ class EzvizStreamCamera(Camera):
 
         Battery cameras report "not online" while merely asleep, and streaming is how
         we wake them, so they are never marked unavailable on that basis. When online
-        state is still unknown (None) we stay available and let a grab decide.
+        state is still unknown (None) we stay available and let a grab decide. A camera
+        that is encrypted but has no verification code configured is also unavailable -
+        its stream can only decode to garbage until the code is added (a repair issue
+        asks the user to reconfigure).
         """
+        if self._serial in self._entry.runtime_data.encrypted_without_code:
+            return False
         return not (self._is_battery is False and self._is_online is False)
 
     def _set_online(self, *, online: bool) -> None:
@@ -263,7 +271,14 @@ class EzvizStreamCamera(Camera):
 
     async def async_added_to_hass(self) -> None:
         """Register the broadcaster and restore the last frame as a failure fallback."""
-        register_stream(self.hass, self._serial, self._token, self._broadcast)
+        register_stream(
+            self.hass,
+            self._serial,
+            self._token,
+            self._broadcast,
+            self._entry.runtime_data.api,
+            self._verification_code,
+        )
         # Restore for failure-fallback only: leave _image_at at 0 so the frame is
         # treated as stale and the next request still attempts a fresh grab, falling
         # back to the restored frame only if that grab fails (no cold-start blank).

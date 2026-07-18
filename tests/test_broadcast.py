@@ -241,6 +241,7 @@ async def test_mpegts_source_forwards_transcode_flag() -> None:
         async for _ in broadcast.mpegts_source(
             api, "SN1", "ffmpeg", stream=1, verification_code="", transcode=True
         ):
+            # Drain the generator; the assertions below check spawn args, not chunks.
             pass
 
     assert spawn.await_args.kwargs["transcode"] is True
@@ -370,6 +371,19 @@ async def test_terminate_escalates_to_kill_on_timeout() -> None:
     proc.kill.assert_called_once()
 
 
+async def test_terminate_reaps_process_after_kill() -> None:
+    """After escalating to kill, the process is awaited so its transport is reaped."""
+    proc = MagicMock()
+    proc.returncode = None  # AsyncMock wait never sets it, so terminate escalates
+    proc.wait = AsyncMock()
+
+    await broadcast._terminate(proc)
+
+    proc.terminate.assert_called_once()
+    proc.kill.assert_called_once()
+    assert proc.wait.await_count >= 2  # graceful wait, then reap after the kill
+
+
 async def test_subscribe_returns_when_upstream_ends() -> None:
     """When the upstream source ends, the subscriber sees the end sentinel and stops."""
 
@@ -398,6 +412,48 @@ async def test_subscribe_start_if_idle_false_taps_only_when_running() -> None:
     assert chunks == []  # nothing was streaming, so nothing to tap
     assert started is False  # the upstream session was never started
     assert caster._task is None
+
+
+async def test_offline_cooldown_skips_restart_after_empty_session() -> None:
+    """A session that streams no media sets a cooldown; the next pull won't restart."""
+    calls = 0
+    media: list[bytes] = []  # empty -> the session produces nothing
+
+    async def source() -> AsyncIterator[bytes]:
+        nonlocal calls
+        calls += 1
+        for chunk in media:
+            yield chunk
+
+    caster = CameraBroadcast(source)
+    with patch.object(broadcast, "_OFFLINE_COOLDOWN", 1000.0):
+        first = await _collect(caster.subscribe(), 5)
+        second = await _collect(caster.subscribe(), 5)
+
+    assert first == []
+    assert second == []
+    assert calls == 1  # the cooldown blocked the second session from starting
+    assert caster._offline_until > 0
+
+
+async def test_productive_session_clears_cooldown() -> None:
+    """A session that streams media leaves no cooldown; the next pull restarts."""
+    calls = 0
+
+    async def source() -> AsyncIterator[bytes]:
+        nonlocal calls
+        calls += 1
+        yield b"frame"
+
+    caster = CameraBroadcast(source)
+    with patch.object(broadcast, "_OFFLINE_COOLDOWN", 1000.0):
+        first = await _collect(caster.subscribe(), 5)
+        second = await _collect(caster.subscribe(), 5)
+
+    assert first == [b"frame"]
+    assert second == [b"frame"]
+    assert calls == 2  # media flowed, so no cooldown - both pulls started a session
+    assert not caster._offline_until  # 0.0 sentinel (no float equality check)
 
 
 async def test_async_stop_cancels_task_and_releases_subscribers() -> None:
@@ -430,3 +486,210 @@ async def test_run_logs_and_ends_on_upstream_error() -> None:
     chunks = [chunk async for chunk in caster.subscribe()]
 
     assert chunks == []  # error -> None sentinel -> no chunks delivered
+
+
+# --- per-clip decrypt + audio decision (_prepare_replay / replay_mp4_source) -- #
+async def _drain(agen: AsyncIterator[bytes]) -> bytes:
+    """Concatenate every chunk an async byte source yields."""
+    return b"".join([chunk async for chunk in agen])
+
+
+async def _src(*chunks: bytes) -> AsyncIterator[bytes]:
+    """A trivial async byte source."""
+    for chunk in chunks:
+        yield chunk
+
+
+async def test_prepare_replay_passthrough_without_code() -> None:
+    """With no verification code there is nothing to decrypt, so bytes pass through."""
+    with patch.object(
+        broadcast, "_probe_audio_encodable", AsyncMock(return_value=True)
+    ):
+        audio_ok, ps = await broadcast._prepare_replay("ffmpeg", _src(b"ab", b"cd"), "")
+    assert audio_ok is True
+    assert await _drain(ps) == b"abcd"
+
+
+async def test_prepare_replay_serves_plaintext_unchanged() -> None:
+    """A clip that already decodes raw is served as-is (decrypting would corrupt it)."""
+    with (
+        patch.object(broadcast, "_probe_frame_count", AsyncMock(return_value=10)),
+        patch.object(broadcast, "_probe_audio_encodable", AsyncMock(return_value=True)),
+    ):
+        _audio_ok, ps = await broadcast._prepare_replay(
+            "ffmpeg", _src(b"plain"), "CODE"
+        )
+    assert await _drain(ps) == b"plain"
+
+
+async def test_prepare_replay_decrypts_when_only_decrypted_decodes() -> None:
+    """Raw fails to decode but decrypted decodes, so the stream is decrypted."""
+    fake = MagicMock()
+    fake.feed.side_effect = lambda b: b"|" + b
+    fake.flush.return_value = b"END"
+    with (
+        patch.object(broadcast, "_probe_frame_count", AsyncMock(side_effect=[0, 10])),
+        patch.object(broadcast, "_probe_audio_encodable", AsyncMock(return_value=True)),
+        patch.object(broadcast, "decrypt_ps_video", lambda b, _k: b),
+        patch.object(broadcast, "decrypt_ps_audio", lambda b, _k: b),
+        patch.object(broadcast, "StreamingPsDecryptor", return_value=fake),
+    ):
+        _audio_ok, ps = await broadcast._prepare_replay("ffmpeg", _src(b"enc"), "CODE")
+        # Drain inside the patch context: _ps_source resolves StreamingPsDecryptor
+        # lazily, so it must still be patched when the generator runs.
+        assert await _drain(ps) == b"|encEND"
+
+
+async def test_prepare_replay_unknown_key_serves_raw_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When neither raw nor decrypted decodes (old key), serve raw and warn."""
+    with (
+        patch.object(broadcast, "_probe_frame_count", AsyncMock(side_effect=[0, 0])),
+        patch.object(
+            broadcast, "_probe_audio_encodable", AsyncMock(return_value=False)
+        ),
+        patch.object(broadcast, "decrypt_ps_video", lambda b, _k: b),
+        patch.object(broadcast, "decrypt_ps_audio", lambda b, _k: b),
+        caplog.at_level("WARNING"),
+    ):
+        _audio_ok, ps = await broadcast._prepare_replay("ffmpeg", _src(b"raw"), "CODE")
+    assert await _drain(ps) == b"raw"
+    assert "different encryption code" in caplog.text
+
+
+async def test_prepare_replay_drops_undecodable_audio() -> None:
+    """A clip whose audio can't be AAC-encoded reports audio_ok False (video only)."""
+    with (
+        patch.object(broadcast, "_probe_frame_count", AsyncMock(return_value=10)),
+        patch.object(
+            broadcast, "_probe_audio_encodable", AsyncMock(return_value=False)
+        ),
+    ):
+        audio_ok, ps = await broadcast._prepare_replay("ffmpeg", _src(b"plain"), "CODE")
+    assert audio_ok is False
+    assert await _drain(ps) == b"plain"  # video bytes still served
+
+
+async def test_prepare_replay_streams_chunks_past_probe_boundary() -> None:
+    """Chunks buffered beyond the probe window still reach the output (plaintext)."""
+    with (
+        patch.object(broadcast, "_PROBE_BYTES", 3),
+        patch.object(broadcast, "_probe_frame_count", AsyncMock(return_value=10)),
+        patch.object(broadcast, "_probe_audio_encodable", AsyncMock(return_value=True)),
+    ):
+        _audio_ok, ps = await broadcast._prepare_replay(
+            "ffmpeg", _src(b"abc", b"def"), "CODE"
+        )
+    assert await _drain(ps) == b"abcdef"
+
+
+async def test_replay_mp4_source_threads_audio_flag() -> None:
+    """replay_mp4_source passes the audio decision through to mp4_replay_source."""
+    with (
+        patch.object(
+            broadcast,
+            "_prepare_replay",
+            AsyncMock(return_value=(False, _src(b"raw"))),
+        ),
+        patch.object(broadcast, "mp4_replay_source", return_value=_src(b"OUT")) as mp4,
+    ):
+        out = await _drain(broadcast.replay_mp4_source("ffmpeg", _src(b"x"), "CODE"))
+    assert out == b"OUT"
+    assert mp4.call_args.kwargs["audio"] is False  # undecodable audio -> -an
+
+
+async def test_probe_audio_encodable_true_on_zero_rc() -> None:
+    """Audio that the AAC encoder accepts (rc 0) is reported encodable."""
+    proc = MagicMock()
+    proc.communicate = AsyncMock(return_value=(b"", b""))
+    proc.returncode = 0
+    with patch.object(
+        broadcast.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ):
+        assert await broadcast._probe_audio_encodable("ffmpeg", b"data") is True
+
+
+async def test_probe_audio_encodable_false_on_nonzero_rc() -> None:
+    """Undecodable / absent audio (nonzero rc) is reported not encodable."""
+    proc = MagicMock()
+    proc.communicate = AsyncMock(return_value=(b"", b""))
+    proc.returncode = 69  # ffmpeg's AAC-encode failure on the failing clip
+    with patch.object(
+        broadcast.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ):
+        assert await broadcast._probe_audio_encodable("ffmpeg", b"data") is False
+
+
+async def test_probe_frame_count_parses_progress() -> None:
+    """The probe returns the last frame= count FFmpeg reports."""
+    proc = MagicMock()
+    proc.communicate = AsyncMock(
+        return_value=(b"frame=3\nprogress=continue\nframe=  17\nprogress=end\n", b"")
+    )
+    with patch.object(
+        broadcast.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ):
+        assert await broadcast._probe_frame_count("ffmpeg", b"data") == 17
+
+
+async def test_probe_frame_count_zero_when_no_frames() -> None:
+    """No frame= output (undecodable input) yields a zero count."""
+    proc = MagicMock()
+    proc.communicate = AsyncMock(return_value=(b"", b"Invalid data"))
+    with patch.object(
+        broadcast.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ):
+        assert await broadcast._probe_frame_count("ffmpeg", b"data") == 0
+
+
+async def test_mp4_replay_source_caps_keyframe_interval() -> None:
+    """mp4_replay_source must set -g so fragments flush (short/static clips play)."""
+    proc = MagicMock()
+    proc.stdin = MagicMock()
+    proc.stdin.write = MagicMock()
+    proc.stdin.drain = AsyncMock()
+    proc.stdin.close = MagicMock()
+    proc.stdout.read = AsyncMock(return_value=b"")  # end the read loop immediately
+    proc.returncode = 0
+    with patch.object(
+        broadcast.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ) as spawn:
+        async for _ in broadcast.mp4_replay_source("ffmpeg", _src(b""), audio=True):
+            # Drain the generator; the assertions below check spawn args, not chunks.
+            pass
+    args = spawn.call_args.args
+    assert "-g" in args  # keyframe-interval cap present
+    assert args[args.index("-g") + 1] == "30"
+
+
+async def test_probe_frame_count_reaps_process_on_cancel() -> None:
+    """A probe cancelled mid-run still reaps its ffmpeg (no orphaned transport)."""
+    proc = MagicMock()
+    started = asyncio.Event()
+
+    async def _block(_: bytes) -> tuple[bytes, bytes]:
+        started.set()
+        await asyncio.Event().wait()  # never completes; force a cancel
+        return b"", b""
+
+    proc.communicate = _block
+    proc.returncode = None
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+
+    def _reap() -> None:
+        proc.returncode = 0
+
+    proc.wait = AsyncMock(side_effect=_reap)
+
+    with patch.object(
+        broadcast.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+    ):
+        task = asyncio.create_task(broadcast._probe_frame_count("ffmpeg", b"x"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    proc.terminate.assert_called_once()  # cleaned up despite the cancellation

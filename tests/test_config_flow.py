@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import voluptuous as vol
 from homeassistant.config_entries import (
     SOURCE_USER,
     ConfigEntryState,
@@ -27,6 +28,7 @@ from custom_components.ezviz_stream.api import (
 from custom_components.ezviz_stream.camera import _snapshot_path_for
 from custom_components.ezviz_stream.config_flow import (
     CameraSubentryFlowHandler,
+    _code_hint,
     _stored_interval,
 )
 from custom_components.ezviz_stream.const import (
@@ -35,6 +37,7 @@ from custom_components.ezviz_stream.const import (
     CONF_IS_BATTERY,
     CONF_IS_ENCRYPTED,
     CONF_MAX_SNAPSHOTS,
+    CONF_RECORDINGS_MODE,
     CONF_REGION,
     CONF_SERIAL,
     CONF_SLOW_THUMBNAILS,
@@ -46,6 +49,7 @@ from custom_components.ezviz_stream.const import (
     DEFAULT_SNAPSHOT_INTERVAL,
     DEFAULT_SNAPSHOT_INTERVAL_BATTERY,
     DOMAIN,
+    RECORDINGS_MODE_DEFAULT,
     THUMBNAIL_INTERVAL,
     THUMBNAIL_MOTION,
     THUMBNAIL_STATIC_MOTION,
@@ -232,6 +236,7 @@ async def test_add_camera_subentry(hass: HomeAssistant) -> None:
         CONF_SNAPSHOT_INTERVAL: DEFAULT_SNAPSHOT_INTERVAL,  # mains default
         CONF_STREAM: 1,  # main stream by default
         CONF_FORCE_H264: False,  # native HEVC copy by default (go2rtc transcodes)
+        CONF_RECORDINGS_MODE: RECORDINGS_MODE_DEFAULT,  # follow the account setting
         CONF_IS_BATTERY: False,
         # CONF_IS_ENCRYPTED omitted: encryption status is unknown for this test cam
     }
@@ -338,6 +343,7 @@ async def test_reconfigure_camera_subentry(hass: HomeAssistant) -> None:
         CONF_SNAPSHOT_INTERVAL: 900,
         CONF_STREAM: 2,  # switched to sub stream
         CONF_FORCE_H264: False,  # not enabled in this reconfigure
+        CONF_RECORDINGS_MODE: RECORDINGS_MODE_DEFAULT,  # unchanged (account default)
         CONF_IS_BATTERY: False,  # resolved from the account (SN1 is IPC)
         # CONF_IS_ENCRYPTED omitted: _CAMERAS leaves encryption status unknown
     }
@@ -458,10 +464,10 @@ async def test_static_motion_mode_records_an_anchor(hass: HomeAssistant) -> None
     assert result["data"][CONF_STATIC_ANCHOR] > 0  # anchored to "now"
 
 
-async def test_unencrypted_camera_hides_verification_code(
+async def test_unencrypted_camera_shows_optional_verification_code(
     hass: HomeAssistant,
 ) -> None:
-    """A definitively-unencrypted camera hides the code field and saves without one."""
+    """A clear camera still shows the code field, optionally, and saves without one."""
     entry = _account_entry()
     entry.add_to_hass(hass)
     cam = EzvizCamera(
@@ -475,8 +481,9 @@ async def test_unencrypted_camera_hides_verification_code(
             result["flow_id"], {CONF_SERIAL: "SNU"}
         )
         assert result["step_id"] == "options"
-        keys = {marker.schema for marker in result["data_schema"].schema}
-        assert CONF_VERIFICATION_CODE not in keys  # hidden for a clear camera
+        markers = {marker.schema: marker for marker in result["data_schema"].schema}
+        assert CONF_VERIFICATION_CODE in markers  # shown even for a clear camera
+        assert isinstance(markers[CONF_VERIFICATION_CODE], vol.Optional)  # but optional
 
         result = await hass.config_entries.subentries.async_configure(
             result["flow_id"], {"advanced": {}}
@@ -486,6 +493,39 @@ async def test_unencrypted_camera_hides_verification_code(
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_IS_ENCRYPTED] is False
     assert result["data"][CONF_VERIFICATION_CODE] == ""
+
+
+async def test_unencrypted_camera_accepts_optional_code_for_old_recordings(
+    hass: HomeAssistant,
+) -> None:
+    """A clear camera may still be given a code (to decrypt older recordings)."""
+    entry = _account_entry()
+    entry.add_to_hass(hass)
+    cam = EzvizCamera(
+        "SNU", "Clear cam", "IPC", 1, 1, streamable=True, is_encrypted=False
+    )
+    with _patch_api(cameras=[cam]), _patch_frame_grab(ok=True):
+        result = await hass.config_entries.subentries.async_init(
+            (entry.entry_id, CAMERA_SUBENTRY_TYPE), context={"source": SOURCE_USER}
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {CONF_SERIAL: "SNU"}
+        )
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {CONF_VERIFICATION_CODE: "OLDKEY", "advanced": {}}
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_IS_ENCRYPTED] is False
+    assert result["data"][CONF_VERIFICATION_CODE] == "OLDKEY"
+
+
+def test_code_hint_prompts_for_old_recordings_when_unencrypted() -> None:
+    """The unencrypted hint is non-empty and mentions the old-recordings case."""
+    hint = _code_hint(is_encrypted=False)
+    assert hint  # field is now always shown, so the hint must not be empty
+    assert "optional" in hint.lower()
 
 
 async def test_add_camera_frame_check_fails_then_save_anyway(
