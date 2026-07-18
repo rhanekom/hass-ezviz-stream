@@ -4,34 +4,26 @@ Forward-looking action list. The authoritative *design* is `specification.md`;
 protocol findings are in `reference.md`. Keep this lean - **prune landed work rather
 than accumulating it** (details live in the specs + git history).
 
-## Where we are (2026-07-16)
+## Where we are (2026-07-18)
 
-**v0.2.0 released.** The integration is live-verified end to end for both camera
-transports (battery RTP/HEVC and mains/IPC encrypted MPEG-PS), installs via HACS,
-passes `hassfest` + HACS CI, and has full unit-test coverage. What remains is polish
-(options, MJPEG fallback, docs) and the net-add feature backlog.
+**v0.2.0 released; recordings & playback shipped since.** The integration is
+live-verified end to end for both camera transports (battery RTP/HEVC and mains/IPC
+encrypted MPEG-PS), installs via HACS, passes `hassfest` + HACS CI, and has full
+unit-test coverage. The flagship net-add (cloud + SD recordings) has landed; what
+remains is polish (options, MJPEG fallback, docs) and the deferred/nice-to-have backlog.
 
 ## Shipped
 
 Done and verified; details live in the code + git history.
 
 - **Recordings & playback (2026-07-17)** - browse and play a camera's **cloud** and
-  **SD-card** recordings in HA's media library (`media_source`: per-camera Cloud / SD
-  subfolders), served as H.264 fragmented MP4. Cloud-replay TLS transport
-  (`cloud_replay.py`) + SD `ysproto` `/playback` (`stream.iter_playback_ps`); record
-  listing via `/v3/clouds/videos/list` and `/v3/streaming/v2/records`. **Video for all
-  cams; audio for all cams** - plaintext, or AES-ECB-decrypted (clear ADTS header) for
-  encrypted cams. Exposure is **opt-in** per account (`enable_recordings`, off by
-  default, for privacy) with a per-camera override. Live-validated (Backyard SD, Deck
-  encrypted). Protocol in `doc/reference.md` Part E / B.10.3.
-- **Recording playback robustness (2026-07-17)** - handle mixed/rotated encryption
-  keys: per-clip decode-probe (`broadcast.maybe_decrypt_replay`) serves each clip
-  plaintext / decrypted / best-effort instead of trusting the crypt flag; `-g 30`
-  keyframe cap on the transcode so short/static clips actually flush fragments and
-  play; always-shown (optional-when-clear) verification-code field for decrypting old
-  clips; and a load-time repair issue for a camera that is encrypted with no code.
-  Live-validated on Front Door / Bar / Deck. See `doc/reference.md` E.4. **Pending:**
-  an in-HA media-browser playback smoke test.
+  **SD-card** recordings in HA's media library (`media_source`, per-camera Cloud/SD
+  folders), served as H.264 fragmented MP4; **video + audio, all cams** (plaintext or
+  AES-ECB-decrypted). **Opt-in** per account (`enable_recordings`, off by default) with
+  a per-camera override. Robust to mixed/rotated encryption keys via a per-clip
+  decode-probe (plaintext / decrypted / best-effort). Cloud-replay TLS transport
+  (`cloud_replay.py`) + SD `ysproto` `/playback`; live-validated. Protocol in
+  `doc/reference.md` Part E / B.10.3. **Pending:** an in-HA media-browser smoke test.
 - **v0.2** - live-session thumbnails, per-camera H.264 transcode, keepalive fix
   (ended the ~5.5 s VTDU churn), offline/reconnect hardening. See the v0.2.0 release
   and git history for detail.
@@ -88,10 +80,6 @@ firmware update, night-vision / work-mode selects, floodlight light, sensitivity
 number, arm/disarm, and motion/alarm sensors - all out of scope. Only build what it
 lacks. No runtime `pyezvizapi` (port behaviour into `api.py`, as with auth/decrypt).
 
-- [x] **Recordings / playback (HIGH VALUE) - SHIPPED 2026-07-17.** Cloud + SD-card
-      recording playback in the media library, video + audio, all cameras. See the
-      Shipped section above and `doc/reference.md` Part E. (Remaining nice-to-haves: an
-      event-type timeline / date grouping; in-HA browser smoke test.)
 - [ ] **MQTT push notifications (valuable; DEFERRED - not scheduled soon).** Official
       `ezviz` is polling-only - its Motion sensor is a 30 s coordinator poll, and
       `paho_mqtt` is only a transitive `loggers` entry (no client started) - so
@@ -121,6 +109,9 @@ lacks. No runtime `pyezvizapi` (port behaviour into `api.py`, as with auth/decry
 
 ## Later / nice-to-have
 
+- [ ] **Recordings polish.** An event-type timeline / date grouping in the media
+      browser, and an in-HA media-browser playback smoke test (the feature itself
+      shipped 2026-07-17 - see Shipped).
 - [ ] **Cloud-clip audio decryption (investigate).** Audio decrypt is validated on
       Deck **SD** but produces garbage on Front Door **cloud** clips (`sample_rate=0`,
       AAC-encode fails) while the video decrypts perfectly - so the "clear ADTS header +
