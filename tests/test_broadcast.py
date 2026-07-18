@@ -417,17 +417,18 @@ async def test_subscribe_start_if_idle_false_taps_only_when_running() -> None:
 async def test_offline_cooldown_skips_restart_after_empty_session() -> None:
     """A session that streams no media sets a cooldown; the next pull won't restart."""
     calls = 0
+    media: list[bytes] = []  # empty -> the session produces nothing
 
     async def source() -> AsyncIterator[bytes]:
         nonlocal calls
         calls += 1
-        return
-        yield  # pragma: no cover - makes this an (empty) async generator
+        for chunk in media:
+            yield chunk
 
     caster = CameraBroadcast(source)
     with patch.object(broadcast, "_OFFLINE_COOLDOWN", 1000.0):
-        first = [chunk async for chunk in caster.subscribe()]
-        second = [chunk async for chunk in caster.subscribe()]
+        first = await _collect(caster.subscribe(), 5)
+        second = await _collect(caster.subscribe(), 5)
 
     assert first == []
     assert second == []
@@ -446,13 +447,13 @@ async def test_productive_session_clears_cooldown() -> None:
 
     caster = CameraBroadcast(source)
     with patch.object(broadcast, "_OFFLINE_COOLDOWN", 1000.0):
-        first = [chunk async for chunk in caster.subscribe()]
-        second = [chunk async for chunk in caster.subscribe()]
+        first = await _collect(caster.subscribe(), 5)
+        second = await _collect(caster.subscribe(), 5)
 
     assert first == [b"frame"]
     assert second == [b"frame"]
     assert calls == 2  # media flowed, so no cooldown - both pulls started a session
-    assert caster._offline_until == 0.0
+    assert not caster._offline_until  # 0.0 sentinel (no float equality check)
 
 
 async def test_async_stop_cancels_task_and_releases_subscribers() -> None:
@@ -677,7 +678,7 @@ async def test_probe_frame_count_reaps_process_on_cancel() -> None:
     proc.terminate = MagicMock()
     proc.kill = MagicMock()
 
-    async def _reap() -> None:
+    def _reap() -> None:
         proc.returncode = 0
 
     proc.wait = AsyncMock(side_effect=_reap)
