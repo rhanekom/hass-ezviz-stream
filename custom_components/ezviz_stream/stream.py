@@ -327,8 +327,10 @@ async def capture_jpeg_from_ts(
             async for chunk in source:
                 stdin.write(chunk)
                 await stdin.drain()
-        except BrokenPipeError, ConnectionResetError, OSError:
-            pass  # FFmpeg emitted its frame and exited; stop feeding
+        except OSError:
+            # BrokenPipeError/ConnectionResetError both derive from OSError:
+            # FFmpeg emitted its frame and exited, so stop feeding.
+            pass
         finally:
             with contextlib.suppress(OSError):
                 stdin.close()

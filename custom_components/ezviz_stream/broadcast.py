@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+_STDIN_PIPE = "pipe:0"  # FFmpeg reads its input from stdin
+_STDOUT_PIPE = "pipe:1"  # FFmpeg writes its muxed output to stdout
 _TS_READ = 65536  # bytes per read from FFmpeg's MPEG-TS output
 _QUEUE_MAX = 512  # per-subscriber backlog; a slow consumer drops its oldest chunks
 _FFMPEG_TERM_TIMEOUT = 5.0
@@ -68,7 +70,7 @@ async def _spawn_ffmpeg(
     args = [ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer"]
     if wallclock:
         args += ["-use_wallclock_as_timestamps", "1"]
-    args += ["-f", input_fmt, "-i", "pipe:0"]
+    args += ["-f", input_fmt, "-i", _STDIN_PIPE]
     if transcode:
         # ultrafast/zerolatency keep encode latency and CPU as low as a live H.264
         # encode allows; -g 30 caps the keyframe gap (~2 s at 15 fps) for quick player
@@ -89,7 +91,7 @@ async def _spawn_ffmpeg(
         ]
     else:
         args += ["-c", "copy"]
-    args += ["-f", "mpegts", "pipe:1"]
+    args += ["-f", "mpegts", _STDOUT_PIPE]
     return await asyncio.create_subprocess_exec(
         *args,
         stdin=asyncio.subprocess.PIPE,
@@ -183,7 +185,7 @@ async def mp4_replay_source(
         "-f",
         "mpeg",
         "-i",
-        "pipe:0",
+        _STDIN_PIPE,
         "-c:v",
         "libx264",
         "-preset",
@@ -199,7 +201,7 @@ async def mp4_replay_source(
         "frag_keyframe+empty_moov+default_base_moof",
         "-f",
         "mp4",
-        "pipe:1",
+        _STDOUT_PIPE,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
@@ -249,7 +251,7 @@ async def _probe_frame_count(ffmpeg_bin: str, ps: bytes) -> int:
         "-f",
         "mpeg",
         "-i",
-        "pipe:0",
+        _STDIN_PIPE,
         "-map",
         "0:v:0",
         "-an",
@@ -259,7 +261,7 @@ async def _probe_frame_count(ffmpeg_bin: str, ps: bytes) -> int:
         "null",
         "-",
         "-progress",
-        "pipe:1",
+        _STDOUT_PIPE,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
@@ -297,7 +299,7 @@ async def _probe_audio_encodable(ffmpeg_bin: str, ps: bytes) -> bool:
         "-f",
         "mpeg",
         "-i",
-        "pipe:0",
+        _STDIN_PIPE,
         "-map",
         "0:a:0",
         "-vn",

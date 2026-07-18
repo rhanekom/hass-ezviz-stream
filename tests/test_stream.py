@@ -358,7 +358,8 @@ class _FakeStdin:
         self.written.extend(data)
 
     async def drain(self) -> None:
-        pass
+        # No-op stand-in: StreamWriter.drain is async, so the fake matches it.
+        return
 
     def close(self) -> None:
         self.closed = True

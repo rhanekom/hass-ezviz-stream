@@ -241,6 +241,7 @@ async def test_mpegts_source_forwards_transcode_flag() -> None:
         async for _ in broadcast.mpegts_source(
             api, "SN1", "ffmpeg", stream=1, verification_code="", transcode=True
         ):
+            # Drain the generator; the assertions below check spawn args, not chunks.
             pass
 
     assert spawn.await_args.kwargs["transcode"] is True
@@ -654,6 +655,7 @@ async def test_mp4_replay_source_caps_keyframe_interval() -> None:
         broadcast.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
     ) as spawn:
         async for _ in broadcast.mp4_replay_source("ffmpeg", _src(b""), audio=True):
+            # Drain the generator; the assertions below check spawn args, not chunks.
             pass
     args = spawn.call_args.args
     assert "-g" in args  # keyframe-interval cap present
