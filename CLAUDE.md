@@ -124,6 +124,14 @@ If you need a tool that isn't installed, install it **and persist it**: global
 tools go in the Dockerfile, user/project tools go in the `setup` script — never
 rely on an ad-hoc install that vanishes on the next rebuild.
 
+Container rebuild gotchas:
+
+- `uv sync` restores the venv from `uv.lock` after a rebuild.
+- `.git` ownership gotcha: setup can leave `.git/objects/*` root-owned, blocking
+  `git add` - fix with `sudo chown -R vscode:vscode .git`.
+- `.env` (creds), `scripts/in/` + `scripts/out/` (captures), and `*.jpg` are
+  gitignored - keep them out of commits.
+
 ## MCP Launchpad (`mcpl`)
 
 `mcpl` is a CLI gateway to tools from all configured MCP servers. The user's MCP
