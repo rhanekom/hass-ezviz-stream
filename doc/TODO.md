@@ -92,11 +92,16 @@ lacks. No runtime `pyezvizapi` (port behaviour into `api.py`, as with auth/decry
       recording playback in the media library, video + audio, all cameras. See the
       Shipped section above and `doc/reference.md` Part E. (Remaining nice-to-haves: an
       event-type timeline / date grouping; in-HA browser smoke test.)
-- [ ] **MQTT push notifications (valuable).** Official `ezviz` is polling-only
-      (`paho_mqtt` is only a transitive `loggers` entry; no client is started), so
+- [ ] **MQTT push notifications (valuable; DEFERRED - not scheduled soon).** Official
+      `ezviz` is polling-only - its Motion sensor is a 30 s coordinator poll, and
+      `paho_mqtt` is only a transitive `loggers` entry (no client started) - so
       real-time push is net-add. Use it to drive event-based snapshot refresh and cut
-      battery-cam wakes - an enhancement to our own on-demand stream/snapshot path,
-      not a duplicate motion sensor. Port `pyezvizapi.mqtt.MQTTClient`:
+      battery-cam wakes; scope v1 to **thumbnail refresh**, not a duplicate motion
+      sensor (the official polled one already exists on the same device). Port
+      `pyezvizapi.mqtt.MQTTClient` (dev-only oracle) into our own module:
+      - **Prerequisite:** login today captures only `session_id` + `host`; MQTT also
+        needs the EZVIZ internal `username` and the `pushAddr` (service URLs), so
+        `api.py` login must capture both first.
       - **Handshake (plain HTTPS on the token's `pushAddr`):** register (-> `clientId`)
         -> start (-> `ticket`) -> connect broker `pushAddr:1882` TCP MQTTv3.1.1,
         subscribe `"<appKey>/#"` QoS 2 -> stop tells the server to stop pushing.
@@ -107,9 +112,12 @@ lacks. No runtime `pyezvizapi` (port behaviour into `api.py`, as with auth/decry
         reserved, sequence_number`. `device_serial` + `alert_type_code` + `time`
         target the refresh; `default_pic_url` (+ `is_encrypted`) is a fresh alarm
         image, replacing our alarms-API poll.
-      - **Runtime dep:** needs an MQTT client - prefer `aiomqtt` (asyncio) over
-        paho's background thread to fit HA's loop. Poll the device first to check
-        push/notifications are enabled.
+      - **Runtime dep:** prefer **paho-mqtt directly** - HA core already bundles it, so
+        no new runtime dependency and no version-clash risk (cost: its background
+        thread needs a `call_soon_threadsafe` hop to the loop). `aiomqtt` is a nicer
+        async fit but adds a dep pinning paho, which must be checked against HA's paho
+        first. One account-wide client in the entry lifecycle, fanning events to
+        cameras by serial; register/start/stop over our existing aiohttp session.
 
 ## Later / nice-to-have
 
