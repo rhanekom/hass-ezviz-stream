@@ -22,7 +22,7 @@ dependencies = [
 #   uv run <cmd>         run a command inside the project environment
 [dependency-groups]
 dev = [
-    "colorlog==6.10.1",
+    "colorlog==6.11.0",
     "homeassistant>=2026.7.2",
     "pre-commit==4.5.1",
     "ruff==0.15.1",
