@@ -7,7 +7,7 @@ it** (details live in `VERSION_HISTORY.md`, the specs, and git history).
 
 ## Where we are (2026-07-18)
 
-**v0.3.0 in progress (recordings & playback landed since v0.2.0).** The integration is
+**v0.3.0 released (cloud + SD recordings & playback landed since v0.2.0).** The integration is
 live-verified end to end for both camera transports (battery RTP/HEVC and mains/IPC
 encrypted MPEG-PS), installs via HACS, passes `hassfest` + HACS CI, and has full
 unit-test coverage. The flagship net-add (cloud + SD recordings) has landed; what

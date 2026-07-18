@@ -3,7 +3,7 @@
 Features that landed in each release. Design lives in `doc/specification.md`,
 protocol findings in `doc/reference.md`, and forward-looking work in `doc/TODO.md`.
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-07-18)
 
 - **Recordings & playback.** Browse and play a camera's **cloud** and **SD-card**
   recordings in Home Assistant's media library (`media_source`, per-camera Cloud/SD
